@@ -1,0 +1,434 @@
+/**
+ * Entry point: 3D scene + VRM avatar, WebSocket, inputs, UI, segment queue.
+ *
+ * Milestone 5: the segment queue drives everything — audio plays through an
+ * AnalyserNode for lip sync, and the segment's emotion is applied (with a
+ * crossfade) at the exact moment its audio starts. Interrupt flushes the
+ * queue, stops audio, and eases the face back to neutral within ~0.3 s.
+ */
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { VRMLoaderPlugin, VRMUtils } from "@pixiv/three-vrm";
+
+import { WSClient } from "./ws.js";
+import { UI } from "./ui.js";
+import { initInput } from "./input.js";
+import { AnimationController } from "./animations.js";
+import { MotionController } from "./motion.js";
+import { ExpressionController } from "./expressions.js";
+import { LipSync } from "./lipsync.js";
+import { GlitchIntro } from "./intro.js";
+import { DebugOverlay } from "./debug.js"; // temporary — Step 2 diagnosis
+
+// Avatar modules appear here once the VRM finishes loading; everything that
+// uses them must tolerate null (VRM missing → chat-only mode still works).
+const avatar = {
+  vrm: null,
+  animations: null,
+  motion: null,
+  expressions: null,
+  lipsync: null,
+};
+
+// ---------------------------------------------------------------------------
+// segment queue — strictly ordered playback through Web Audio
+// ---------------------------------------------------------------------------
+
+class SegmentPlayer {
+  /**
+   * @param onChange       playing-state changed (drives the state pill)
+   * @param onSegmentStart a segment's audio (or text-only hold) just started
+   * @param onAnalyser     the shared AnalyserNode exists now (lazy)
+   */
+  constructor({ onChange, onSegmentStart, onAnalyser }) {
+    this._onChange = onChange;
+    this._onSegmentStart = onSegmentStart;
+    this._onAnalyser = onAnalyser;
+    this._queue = [];
+    this._busy = false;
+    this._source = null;
+    this._holdTimer = null;
+    this._gen = 0; // bumped on flush; orphans async work from before the flush
+    this._ctx = null;
+    this.analyser = null;
+  }
+
+  get playing() {
+    return this._busy || this._queue.length > 0;
+  }
+
+  /** seg: {text, emotion, gesture, audio: base64|null} */
+  enqueue(seg) {
+    this._queue.push(seg);
+    this._next();
+  }
+
+  /** Interrupt: drop the queue and stop the current segment immediately. */
+  flush() {
+    this._gen++;
+    this._queue.length = 0;
+    if (this._holdTimer !== null) {
+      clearTimeout(this._holdTimer);
+      this._holdTimer = null;
+    }
+    if (this._source) {
+      try {
+        this._source.stop();
+      } catch {
+        /* already stopped */
+      }
+      this._source = null;
+    }
+    this._busy = false;
+    this._onChange();
+  }
+
+  _ensureCtx() {
+    if (!this._ctx) {
+      this._ctx = new AudioContext();
+      this.analyser = this._ctx.createAnalyser();
+      this.analyser.fftSize = 1024;
+      this.analyser.smoothingTimeConstant = 0; // lipsync does its own smoothing
+      this.analyser.connect(this._ctx.destination);
+      this._onAnalyser(this.analyser);
+    }
+    if (this._ctx.state === "suspended") this._ctx.resume();
+    return this._ctx;
+  }
+
+  async _next() {
+    if (this._busy || this._queue.length === 0) return;
+    this._busy = true;
+    const gen = this._gen;
+    const seg = this._queue.shift();
+    this._onChange();
+    this._onSegmentStart(seg);
+
+    if (seg.audio) {
+      try {
+        const ctx = this._ensureCtx();
+        const bytes = Uint8Array.from(atob(seg.audio), (c) => c.charCodeAt(0));
+        const buffer = await ctx.decodeAudioData(bytes.buffer);
+        if (gen !== this._gen) return; // flushed while decoding
+        const source = ctx.createBufferSource();
+        source.buffer = buffer;
+        source.connect(this.analyser);
+        source.onended = () => {
+          if (this._source !== source) return; // flushed
+          this._source = null;
+          this._busy = false;
+          this._onChange();
+          this._next();
+        };
+        this._source = source;
+        source.start();
+        return;
+      } catch (err) {
+        console.warn("segment audio failed, showing text only:", err);
+        if (gen !== this._gen) return;
+      }
+    }
+
+    // Text-only segment: hold roughly as long as reading it would take, so
+    // the expression doesn't flash by when TTS is down.
+    const holdMs = Math.min(5000, Math.max(900, seg.text.length * 55));
+    this._holdTimer = setTimeout(() => {
+      this._holdTimer = null;
+      this._busy = false;
+      this._onChange();
+      this._next();
+    }, holdMs);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 3D avatar
+// ---------------------------------------------------------------------------
+
+async function initAvatar(ui) {
+  const viewport = document.getElementById("viewport");
+  const msgEl = document.getElementById("viewport-msg");
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  viewport.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x101018);
+
+  const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 20);
+  camera.position.set(0, 1.32, 1.4); // provisional — reframed from the model after load
+
+  // Nudging the camera doubles as the manual test for look-at + spring bones.
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.target.set(0, 1.28, 0);
+  controls.enableDamping = true;
+  controls.minDistance = 0.5;
+  controls.maxDistance = 4;
+  controls.maxPolarAngle = Math.PI * 0.6;
+  controls.enablePan = false;
+
+  const intro = new GlitchIntro(renderer, scene, camera);
+
+  const key = new THREE.DirectionalLight(0xffffff, 1.6);
+  key.position.set(0.6, 1.8, 1.5);
+  scene.add(key);
+  const fill = new THREE.DirectionalLight(0x8899cc, 0.5);
+  fill.position.set(-1.2, 0.8, -0.8);
+  scene.add(fill);
+  scene.add(new THREE.AmbientLight(0xffffff, 0.45));
+
+  const resize = () => {
+    const { clientWidth: w, clientHeight: h } = viewport;
+    renderer.setSize(w, h);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  };
+  new ResizeObserver(resize).observe(viewport);
+  resize();
+
+  try {
+    const loader = new GLTFLoader();
+    loader.register((p) => new VRMLoaderPlugin(p));
+    const gltf = await loader.loadAsync("/character.vrm");
+    const vrm = gltf.userData.vrm;
+    VRMUtils.removeUnnecessaryVertices(gltf.scene);
+    VRMUtils.combineSkeletons(gltf.scene);
+    VRMUtils.rotateVRM0(vrm); // VRM 0.x faces -Z; make every model face the camera
+    vrm.scene.traverse((obj) => (obj.frustumCulled = false)); // avoids mesh pop-out
+    scene.add(vrm.scene);
+
+    // Auto-frame from the model's actual proportions: eye-level camera at
+    // portrait distance, face in the upper third. Works for any model height
+    // (hardcoded values framed short models too small / too low).
+    vrm.scene.updateMatrixWorld(true);
+    const headNode =
+      vrm.humanoid?.getNormalizedBoneNode("head") ?? vrm.humanoid?.getRawBoneNode("head");
+    if (headNode) {
+      const headPos = new THREE.Vector3();
+      headNode.getWorldPosition(headPos);
+      const eyeY = headPos.y + 0.06;            // head bone sits at the neck end
+      camera.position.set(0, eyeY, 1.05);       // eye-level, bust-up distance
+      controls.target.set(0, eyeY - 0.15, 0);   // aim at upper chest → face upper third
+      controls.update();
+    }
+
+    const animations = new AnimationController(vrm);
+    await animations.loadIdles([
+      "/animations/idle_01.vrma",
+      // idle_02 removed from rotation: clip motion wasn't smooth (user call).
+      // Re-add the line when a better clip is available.
+      "/animations/idle_03.vrma",
+    ]);
+    animations.start();
+    await animations.loadGestures({
+      // protocol gestures (LLM-triggered)
+      wave: "/animations/wave.vrma",
+      nod: "/animations/nod.vrma",
+      shake: "/animations/shake.vrma",
+      think: "/animations/think.vrma",
+      clap: "/animations/clap.vrma",
+      bounce: "/animations/bounce.vrma",
+      tilt: "/animations/tilt.vrma",
+      lean_in: "/animations/lean_in.vrma",
+      fidget: "/animations/fidget.vrma",
+      peace: "/animations/peace.vrma",
+      // extra clips, used only as idle fidgets (never sent by the LLM)
+      thankful: "/animations/thankful.vrma",
+      thoughtful_nod: "/animations/thoughtful_nod.vrma",
+      spin: "/animations/spin.vrma",
+    });
+    // Hidden idle animations: occasionally play one of these when she has
+    // been still for a while, so she never reads as frozen.
+    animations.setFidgetPool(["peace", "think", "thankful", "thoughtful_nod", "spin"]);
+
+    avatar.vrm = vrm;
+    avatar.animations = animations;
+    avatar.lipsync = new LipSync(vrm);
+    avatar.motion = new MotionController(vrm, camera, scene, {
+      speechLevel: () => avatar.lipsync?.level ?? 0,
+      onEmphasis: () => avatar.expressions?.pulseEmphasis(),
+    });
+    avatar.expressions = new ExpressionController(vrm, avatar.motion);
+    // Gesture clips get anticipation + release overshoot from the procedural layer.
+    animations.onGestureStart = () => avatar.motion?.anticipate();
+    animations.onGestureEnd = () => avatar.motion?.gestureRelease();
+    if (player.analyser) avatar.lipsync.setAnalyser(player.analyser);
+    debug.attach(vrm, () => avatar.lipsync?.level ?? 0);
+    intro.begin(vrm.scene); // glitch-materialize instead of popping in
+    console.info("avatar ready");
+  } catch (err) {
+    console.warn("could not load /character.vrm:", err);
+    msgEl.hidden = false;
+    msgEl.textContent =
+      "No avatar loaded.\nPut your model at assets/character.vrm and reload — chat works either way.";
+    ui.toast("character.vrm not found in assets/ — running chat-only.");
+  }
+
+  const clock = new THREE.Clock();
+  renderer.setAnimationLoop(() => {
+    const delta = clock.getDelta();
+    controls.update();
+    if (avatar.animations) avatar.animations.update(delta); // layer 1+2: mixer
+    if (avatar.motion) avatar.motion.update(delta);         // layer 3: procedural additive
+    if (avatar.expressions) avatar.expressions.update(delta);
+    if (avatar.lipsync) avatar.lipsync.update(delta);
+    if (avatar.vrm) avatar.vrm.update(delta);               // look-at, expressions, spring bones
+    if (avatar.motion) avatar.motion.revert();              // offsets must never accumulate
+    debug.update(delta);
+    if (intro.active) {
+      intro.update(delta);
+      intro.render(); // post-processed glitch frame during the spawn
+    } else {
+      renderer.render(scene, camera);
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
+// chat wiring
+// ---------------------------------------------------------------------------
+
+const ui = new UI();
+const ws = new WSClient();
+const debug = new DebugOverlay();
+
+let backendState = "idle";
+let micHeld = false;
+
+// After a reply finishes, the last emotion lingers briefly (a natural
+// trailing reaction), then the face settles back to neutral. Without this
+// she'd hold e.g. [surprised] — wide-eyed, blink suppressed — forever.
+const CALM_DOWN_MS = 1800;
+let calmTimer = null;
+
+const player = new SegmentPlayer({
+  onChange: () => {
+    refreshState();
+    if (!player.playing) {
+      // Queue drained naturally: linger, then ease back to neutral.
+      clearTimeout(calmTimer);
+      calmTimer = setTimeout(() => {
+        calmTimer = null;
+        avatar.expressions?.reset();
+        avatar.motion?.setEmotion("neutral");
+      }, CALM_DOWN_MS);
+    } else if (calmTimer !== null) {
+      // More audio arrived (still streaming) — keep the current emotion.
+      clearTimeout(calmTimer);
+      calmTimer = null;
+    }
+    // Between sentences nothing resets: each segment's emotion holds until
+    // the next one arrives (anime-timing spec).
+  },
+  onSegmentStart: (seg) => {
+    // Emotion and gesture apply the moment the segment's audio starts (protocol).
+    avatar.expressions?.setEmotion(seg.emotion);
+    avatar.motion?.setEmotion(seg.emotion);
+    avatar.animations?.playGesture(seg.gesture);
+  },
+  onAnalyser: (analyser) => {
+    if (avatar.lipsync) avatar.lipsync.setAnalyser(analyser);
+  },
+});
+
+/** listening (mic held) > speaking (audio playing) > whatever backend says. */
+function refreshState() {
+  let state = backendState;
+  if (micHeld) state = "listening";
+  else if (player.playing) state = "speaking";
+  ui.setState(state);
+  avatar.motion?.setState(state); // attentive lean-in / think pose / etc.
+}
+
+ws.onConnection((ok) => {
+  ui.setConnected(ok);
+  if (!ok) {
+    backendState = "idle";
+    refreshState();
+  }
+});
+
+ws.on("state", (msg) => {
+  backendState = msg.value;
+  refreshState();
+});
+ws.on("transcript", (msg) => ui.addUserMessage(msg.text, { voice: true }));
+ws.on("segment", (msg) => {
+  ui.addSegment(msg);
+  player.enqueue(msg);
+});
+ws.on("reply_done", () => {});
+ws.on("error", (msg) => ui.toast(msg.message));
+
+/** User is starting a new message — cut off any reply in progress. */
+function interruptIfBusy() {
+  if (player.playing || backendState === "thinking" || backendState === "speaking") {
+    ws.send({ type: "interrupt" });
+    player.flush();
+    // Interrupt eases everything back to neutral immediately (no linger).
+    clearTimeout(calmTimer);
+    calmTimer = null;
+    avatar.expressions?.reset();
+    avatar.motion?.setEmotion("neutral");
+    avatar.animations?.cancelGestures();
+  }
+}
+
+function sendOrToast(msg) {
+  if (!ws.send(msg)) {
+    ui.toast("Not connected to the backend — is it running? (py -m uvicorn main:app --port 8000)");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// idle fidgets — after 15-25 s of true idle, play either a hidden gesture
+// clip or a procedural micro-fidget (hand shift / shrug / pondering tilt)
+// ---------------------------------------------------------------------------
+
+let lastActivityAt = Date.now();
+let nextFidgetMs = randFidgetDelay();
+
+function randFidgetDelay() {
+  return 15_000 + Math.random() * 10_000;
+}
+
+setInterval(() => {
+  const trulyIdle = backendState === "idle" && !player.playing && !micHeld;
+  if (!trulyIdle) {
+    lastActivityAt = Date.now();
+    return;
+  }
+  if (Date.now() - lastActivityAt >= nextFidgetMs) {
+    if (Math.random() < 0.5) avatar.animations?.playRandomFidget();
+    else avatar.motion?.proceduralFidget();
+    lastActivityAt = Date.now();
+    nextFidgetMs = randFidgetDelay();
+  }
+}, 1000);
+
+initInput({
+  onText: (text) => {
+    interruptIfBusy();
+    ui.addUserMessage(text);
+    ui.newReply();
+    sendOrToast({ type: "user_text", text });
+  },
+  onHoldStart: () => {
+    micHeld = true;
+    interruptIfBusy();
+    refreshState();
+  },
+  onHoldEnd: () => {
+    micHeld = false;
+    refreshState();
+  },
+  onAudio: (audioB64) => {
+    ui.newReply();
+    sendOrToast({ type: "user_audio", audio: audioB64 });
+  },
+  onMicError: (message) => ui.toast(message),
+});
+
+initAvatar(ui);

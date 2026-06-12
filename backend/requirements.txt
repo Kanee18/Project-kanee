@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+faster-whisper
+anthropic
+openai
+google-genai
+httpx
+pyyaml
+python-dotenv
+pytest

@@ -1,0 +1,19 @@
+# secrets & local state
+backend/.env
+backend/chat_history.json
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# node
+node_modules/
+frontend/dist/
+
+# generated audio
+*.gen.wav
+tts_cache/
+
+CLAUDE.md
