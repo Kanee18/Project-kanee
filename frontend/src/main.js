@@ -265,7 +265,7 @@ async function initAvatar(ui) {
     // Optional state base loops — supply these files and they're used
     // automatically (graceful fallback to idle while absent).
     await animations.loadStateLoops({
-      speaking: "/animations/talk_01.vrma",
+      speaking: "/animations/explain.vrma", // the talking/explaining body animation
       listening: "/animations/listening_01.vrma",
       thinking: "/animations/thinking_01.vrma",
     });
@@ -397,7 +397,9 @@ let calmTimer = null;
 const player = new SegmentPlayer({
   onChange: () => {
     refreshState();
-    avatar.animations?.setTalking(player.playing); // hands gesture while audio plays
+    // explain.vrma (the speaking base loop) is the talking body language now,
+    // so auto conversational gesture clips stay off — they'd interrupt it.
+    // LLM per-sentence gestures still play over it via onSegmentStart.
     if (!player.playing) {
       // Queue drained naturally: linger, then ease back to neutral.
       clearTimeout(calmTimer);

@@ -90,7 +90,12 @@ export class AnimationController {
   async loadStateLoops(urlByState) {
     for (const [state, url] of Object.entries(urlByState)) {
       const clip = await this._loadClip(url);
-      if (clip) this._stateLoops[state] = this.mixer.clipAction(clip);
+      if (!clip) continue;
+      // Rotations only: drop the hips POSITION (root motion) track, or the
+      // clip translates her forward ("suddenly moves to the front"). She
+      // stays planted; the procedural layer owns any sway.
+      clip.tracks = clip.tracks.filter((t) => t.name.endsWith(".quaternion"));
+      this._stateLoops[state] = this.mixer.clipAction(clip);
     }
     const have = Object.keys(this._stateLoops);
     if (have.length) console.info(`animations: state loops loaded: [${have.join(", ")}]`);
