@@ -21,6 +21,7 @@ import { LipSync } from "./lipsync.js";
 import { GlitchIntro } from "./intro.js";
 import { CameraDirector } from "./camera.js";
 import { VirtualWorld } from "./world.js";
+import { Hologram } from "./hologram.js";
 import { DebugOverlay } from "./debug.js"; // temporary — Step 2 diagnosis
 
 // Avatar modules appear here once the VRM finishes loading; everything that
@@ -32,6 +33,7 @@ const avatar = {
   expressions: null,
   lipsync: null,
   cameraDirector: null,
+  hologram: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -159,6 +161,8 @@ class SegmentPlayer {
 async function initAvatar(ui) {
   const viewport = document.getElementById("viewport");
   const msgEl = document.getElementById("viewport-msg");
+  const hologram = new Hologram(viewport);
+  avatar.hologram = hologram;
 
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
@@ -258,6 +262,8 @@ async function initAvatar(ui) {
       spin: "/animations/spin.vrma",
       // emote clip for the emote button (assets/emotes/, space URL-encoded)
       kawaii: "/emotes/Kawaii%20Kaiwai.vrma",
+      // math-answer presenting gesture (paired with the hologram)
+      answare_math: "/animations/answare_math.vrma",
     });
     // Hidden idle animations: occasionally play one of these when she has
     // been still for a while, so she never reads as frozen.
@@ -366,6 +372,7 @@ async function initAvatar(ui) {
     if (avatar.lipsync) avatar.lipsync.update(delta);
     if (avatar.vrm) avatar.vrm.update(delta);               // look-at, expressions, spring bones
     if (avatar.motion) avatar.motion.revert();              // offsets must never accumulate
+    hologram.update(camera);                                // re-project the fixed math hologram
     debug.update(delta);
     if (intro.active) {
       intro.update(delta);
@@ -387,6 +394,21 @@ const debug = new DebugOverlay();
 let backendState = "idle";
 let micHeld = false;
 let emoteActive = false; // true while an emote clip plays — drives the foot→ground scroll
+const HOLOGRAM_LINGER = 5000; // ms the answer screen stays up after she finishes speaking
+let pendingMath = null;  // {expr, answer} from a "math" event, until the reply's first segment
+let mathAnswer = null;   // {expr, answer} held through the reply, shown at reply_done
+let mathActive = false;  // presenting a math answer (hold pose/expression, no per-sentence gestures)
+let mathHoldTimer = null;
+
+/** Tear down the math presentation immediately (interrupt / error / new msg). */
+function endMath() {
+  mathActive = false;
+  pendingMath = null;
+  mathAnswer = null;
+  clearTimeout(mathHoldTimer);
+  mathHoldTimer = null;
+  avatar.hologram?.hide();
+}
 
 // After a reply finishes, the last emotion lingers briefly (a natural
 // trailing reaction), then the face settles back to neutral. Without this
@@ -401,13 +423,20 @@ const player = new SegmentPlayer({
     // so auto conversational gesture clips stay off — they'd interrupt it.
     // LLM per-sentence gestures still play over it via onSegmentStart.
     if (!player.playing) {
-      // Queue drained naturally: linger, then ease back to neutral.
-      clearTimeout(calmTimer);
-      calmTimer = setTimeout(() => {
+      // During a math answer the presentation owns the teardown (synced to the
+      // animation length), so don't let the calm timer reset her early.
+      if (mathActive) {
+        clearTimeout(calmTimer);
         calmTimer = null;
-        avatar.expressions?.reset();
-        avatar.motion?.setEmotion("neutral");
-      }, CALM_DOWN_MS);
+      } else {
+        // Queue drained naturally: linger, then ease back to neutral.
+        clearTimeout(calmTimer);
+        calmTimer = setTimeout(() => {
+          calmTimer = null;
+          avatar.expressions?.reset();
+          avatar.motion?.setEmotion("neutral");
+        }, CALM_DOWN_MS);
+      }
     } else if (calmTimer !== null) {
       // More audio arrived (still streaming) — keep the current emotion.
       clearTimeout(calmTimer);
@@ -421,6 +450,20 @@ const player = new SegmentPlayer({
     avatar.expressions?.setEmotion(seg.emotion);
     avatar.motion?.setEmotion(seg.emotion);
     avatar.animations?.setEmotion(seg.emotion);
+    // Math answer: on the reply's first segment, present with answare_math
+    // + the floating hologram showing the answer.
+    if (pendingMath) {
+      // She presents (answare_math) while speaking; the hologram itself appears
+      // to her right AFTER she finishes (handled in reply_done).
+      mathActive = true;
+      mathAnswer = pendingMath;
+      pendingMath = null;
+      avatar.animations?.playGesture("answare_math", { replace: true });
+      return; // hold the presenting pose; skip the per-sentence gesture
+    }
+    // While presenting a math answer, keep the hand on the hologram (don't
+    // let per-sentence gestures pull it away).
+    if (mathActive) return;
     // replace:true keeps gestures in sync with the sentence being SPOKEN —
     // a leftover gesture from the previous sentence fades out instead of
     // delaying this one out of context.
@@ -462,12 +505,39 @@ ws.on("state", (msg) => {
   refreshState();
 });
 ws.on("transcript", (msg) => ui.addUserMessage(msg.text, { voice: true }));
+ws.on("math", (msg) => {
+  // Arithmetic question detected; the hologram + answare_math fire when the
+  // reply's first segment arrives (so they sync with her speaking).
+  pendingMath = { expr: msg.expr, answer: msg.answer };
+});
 ws.on("segment", (msg) => {
   ui.addSegment(msg);
   player.enqueue(msg);
 });
-ws.on("reply_done", () => {});
-ws.on("error", (msg) => ui.toast(msg.message));
+ws.on("reply_done", () => {
+  // After she finishes speaking, pop the answer hologram to her right and let
+  // it linger so it's readable, then fade.
+  if (mathActive && mathAnswer) {
+    avatar.hologram?.show(mathAnswer.expr, mathAnswer.answer, avatar.vrm);
+    mathAnswer = null;
+    clearTimeout(mathHoldTimer);
+    mathHoldTimer = setTimeout(() => {
+      mathHoldTimer = null;
+      mathActive = false;
+      avatar.hologram?.hide();
+      if (!player.playing) {
+        avatar.expressions?.reset();
+        avatar.motion?.setEmotion("neutral");
+      }
+    }, HOLOGRAM_LINGER);
+  } else {
+    pendingMath = null; // unconsumed (e.g. empty reply)
+  }
+});
+ws.on("error", (msg) => {
+  ui.toast(msg.message);
+  endMath();
+});
 
 /** User is starting a new message — cut off any reply in progress. */
 function interruptIfBusy() {
@@ -480,6 +550,7 @@ function interruptIfBusy() {
     avatar.expressions?.reset();
     avatar.motion?.setEmotion("neutral");
     avatar.animations?.cancelGestures();
+    endMath(); // drop any math hologram immediately
   }
 }
 

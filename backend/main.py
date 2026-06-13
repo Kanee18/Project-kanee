@@ -30,6 +30,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from asr import Transcriber
 from llm import LLMClient
+from math_solver import solve as solve_math
 from parser import Segment, StreamingTagParser
 from tts import SovitsClient, TTSRequestError, TTSUnavailableError
 
@@ -149,6 +150,11 @@ class Session:
         async with self.pipe.reply_lock:
             t0 = time.perf_counter()
             await self.send({"type": "state", "value": "thinking"})
+            # Arithmetic question → drive the math-answer animation + hologram.
+            math = solve_math(user_text)
+            if math is not None:
+                logger.info("math: %s = %s", math["expr"], math["answer"])
+                await self.send({"type": "math", "expr": math["expr"], "answer": math["answer"]})
             parser = StreamingTagParser()
             seg_q: asyncio.Queue[Optional[Segment]] = asyncio.Queue()
             llm_error: Optional[Exception] = None
