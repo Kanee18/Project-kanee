@@ -291,13 +291,45 @@ async function initAvatar(ui) {
     ui.toast("character.vrm not found in assets/ — running chat-only.");
   }
 
+  // Foot-driven ground scroll during emotes: the world slides following the
+  // horizontal movement of the feet, so an emote dance reads as motion.
+  const FOOT_SCROLL_GAIN = 3.5;
+  const _footNow = new THREE.Vector3();
+  const _lf = new THREE.Vector3();
+  let _prevFoot = null;
+  function scrollWorldFromFeet() {
+    if (!emoteActive || !avatar.vrm) {
+      _prevFoot = null;
+      return;
+    }
+    // Raw bones live in vrm.scene, so the renderer keeps their world matrices
+    // fresh (the normalized rig is a separate hierarchy and would be stale).
+    const h = avatar.vrm.humanoid;
+    const left = h?.getRawBoneNode("leftFoot");
+    const right = h?.getRawBoneNode("rightFoot");
+    if (!left || !right) return;
+    left.getWorldPosition(_footNow);
+    right.getWorldPosition(_lf);
+    _footNow.add(_lf).multiplyScalar(0.5); // midpoint of the two feet
+    if (_prevFoot) {
+      world.addScroll(
+        (_footNow.x - _prevFoot.x) * FOOT_SCROLL_GAIN,
+        (_footNow.z - _prevFoot.z) * FOOT_SCROLL_GAIN,
+      );
+    } else {
+      _prevFoot = new THREE.Vector3();
+    }
+    _prevFoot.copy(_footNow);
+  }
+
   const clock = new THREE.Clock();
   renderer.setAnimationLoop(() => {
     const delta = clock.getDelta();
     // The cinematic director owns the camera while moving; otherwise OrbitControls.
     const cinematic = avatar.cameraDirector ? avatar.cameraDirector.update(delta) : false;
     if (!cinematic) controls.update();
-    world.update(delta);                                    // backdrop motes/pad
+    scrollWorldFromFeet();                                  // reads last frame's foot matrices
+    world.update(delta);                                    // backdrop motes/pad/scroll
     if (avatar.animations) avatar.animations.update(delta); // layer 1+2: mixer
     if (avatar.motion) avatar.motion.update(delta);         // layer 3: procedural additive
     if (avatar.expressions) avatar.expressions.update(delta);
@@ -324,6 +356,7 @@ const debug = new DebugOverlay();
 
 let backendState = "idle";
 let micHeld = false;
+let emoteActive = false; // true while an emote clip plays — drives the foot→ground scroll
 
 // After a reply finishes, the last emotion lingers briefly (a natural
 // trailing reaction), then the face settles back to neutral. Without this
@@ -429,14 +462,25 @@ function sendOrToast(msg) {
 // ---------------------------------------------------------------------------
 
 let emoteCalmTimer = null;
+let emoteActiveTimer = null;
 
 document.getElementById("emote").addEventListener("click", () => {
-  const dur = avatar.animations?.playGesture("kawaii") || 3;
-  avatar.expressions?.playEmote(dur); // scripted idol wink → happy smile
-  avatar.motion?.setEmotion("happy"); // happy body posture (squint is suppressed during the wink)
+  // Clear any hidden animation in progress so the emote doesn't collide with
+  // it: a procedural fidget's impulses are dropped, and an active clip fidget
+  // is replaced (faded out) rather than queued behind.
+  avatar.motion?.clearImpulses();
+  const dur = avatar.animations?.playGesture("kawaii", { replace: true }) || 3;
+  avatar.expressions?.playEmote(dur); // held smile, eyes open (no blink/winks)
+  avatar.motion?.setEmotion("happy"); // happy body posture
   // Pull the camera out to a full-body shot for the length of the clip
   // (+ time for the ease-out and ease-back) so the whole emote is visible.
   avatar.cameraDirector?.showFull(dur + 0.3);
+  // Ground follows her feet only while the clip itself is playing.
+  emoteActive = true;
+  clearTimeout(emoteActiveTimer);
+  emoteActiveTimer = setTimeout(() => {
+    emoteActive = false;
+  }, dur * 1000);
   clearTimeout(emoteCalmTimer);
   emoteCalmTimer = setTimeout(() => {
     // Don't stomp a reply that started playing in the meantime.
@@ -460,7 +504,9 @@ function randFidgetDelay() {
 }
 
 setInterval(() => {
-  const trulyIdle = backendState === "idle" && !player.playing && !micHeld;
+  // An active emote counts as activity: this both blocks a fidget from firing
+  // mid-emote and resets the timer so none fires the instant the emote ends.
+  const trulyIdle = backendState === "idle" && !player.playing && !micHeld && !emoteActive;
   if (!trulyIdle) {
     lastActivityAt = Date.now();
     return;

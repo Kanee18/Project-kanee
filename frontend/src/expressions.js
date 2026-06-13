@@ -92,14 +92,14 @@ export class ExpressionController {
   }
 
   /**
-   * Scripted idol-wink emote: smile, wink one eye, settle into a happy
-   * closed-eye smile. Suspends the random auto-blink + squint for its
-   * duration so the eyes move intentionally instead of shutting at random.
+   * Emote face: hold a smile with NO eye animation. Auto-blink is suspended
+   * and the blink channels are pinned open for the whole emote, so the eyes
+   * stay natural and open (no winks, no closing).
    */
   playEmote(duration) {
     this._emote = { t: 0, dur: Math.max(duration, 1.4) };
     for (const key of this._available) this._targets[key] = 0;
-    if (this._available.has("happy")) this._targets["happy"] = EMOTE_WINK_SMILE;
+    if (this._available.has("happy")) this._targets["happy"] = EMOTE_SMILE;
     if (this.motion) this.motion.suppressBlink = true; // we own the eyes now
   }
 
@@ -134,46 +134,17 @@ export class ExpressionController {
       }
       em.setValue(name, value);
     }
-    // Scripted emote eye timeline (runs after motion.js in the loop, so it
-    // owns the blink channels). `m` is the "eyes-closed middle" amount:
-    //   m=0 → wink phase   (blink closes the wink eye, happy low)
-    //   m=1 → middle       (happy alone closes both eyes; NO blink → no over-drive)
+    // Emote: hold the smile, keep the eyes fully open (no blink, no winks).
+    // Runs after motion.js in the loop, so pinning the blink channels to 0
+    // here overrides the suspended auto-blink for the emote's duration.
     if (this._emote) {
       this._emote.t += delta;
-      const { t, dur } = this._emote;
-      const p = t / dur;
-      const m = emoteMiddle(p);
-      // Two discrete wink pulses (close → hold → reopen), gated by (1 - m)
-      // so the wink morph never sums with the happy that closes the eyes
-      // in the middle (sum > 1 collapses the eye geometry).
-      const wink = Math.max(winkPulse(p, WINK_1), winkPulse(p, WINK_2)) * (1 - m);
-      if (this._eyes.blinkRight) em.setValue("blinkRight", wink);
-      if (this._eyes.blinkLeft) em.setValue("blinkLeft", 0);
       if (this._eyes.blink) em.setValue("blink", 0);
-      if (this._available.has("happy")) {
-        this._targets["happy"] = EMOTE_WINK_SMILE + (EMOTE_MID_SMILE - EMOTE_WINK_SMILE) * m;
-      }
-      if (t >= dur) this._endEmote();
+      if (this._eyes.blinkLeft) em.setValue("blinkLeft", 0);
+      if (this._eyes.blinkRight) em.setValue("blinkRight", 0);
+      if (this._emote.t >= this._emote.dur) this._endEmote();
     }
   }
-}
-
-/** Eyes-closed "middle" amount over the emote (normalized progress): wink → closed → wink. */
-function emoteMiddle(p) {
-  if (p < 0.34) return 0;
-  if (p < 0.44) return smooth01((p - 0.34) / 0.1);
-  if (p < 0.6) return 1;
-  if (p < 0.7) return 1 - smooth01((p - 0.6) / 0.1);
-  return 0;
-}
-
-/** Close-hold-reopen pulse inside the [a, b] progress window. */
-function winkPulse(p, [a, b]) {
-  if (p <= a || p >= b) return 0;
-  const x = (p - a) / (b - a);
-  if (x < 0.25) return smooth01(x / 0.25);
-  if (x < 0.75) return 1;
-  return 1 - smooth01((x - 0.75) / 0.25);
 }
 
 function smooth01(x) {

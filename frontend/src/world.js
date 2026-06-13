@@ -17,9 +17,14 @@ const PARTICLE_AREA = 9;        // m, square around the character
 const PARTICLE_HEIGHT = 4;      // m, rise then wrap
 const PAD_COLOR = 0x66aaff;
 
+const GRID_SIZE = 40;
+const GRID_DIV = 80;
+const GRID_CELL = GRID_SIZE / GRID_DIV; // 0.5 m
+
 export class VirtualWorld {
   constructor(scene) {
     this._t = 0;
+    this._scroll = new THREE.Vector2(0, 0); // accumulated ground scroll (x, z)
 
     scene.fog = new THREE.Fog(SKY_BOTTOM, FOG_NEAR, FOG_FAR);
 
@@ -58,10 +63,11 @@ export class VirtualWorld {
     scene.add(this._sky);
 
     // -- neon grid floor --------------------------------------------------------
-    const grid = new THREE.GridHelper(40, 80, GRID_CENTER, GRID_MAIN);
+    const grid = new THREE.GridHelper(GRID_SIZE, GRID_DIV, GRID_CENTER, GRID_MAIN);
     grid.material.transparent = true;
     grid.material.opacity = 0.55;
     scene.add(grid);
+    this._grid = grid;
 
     // -- spawn pad under the character -------------------------------------------
     this._pad = new THREE.Group();
@@ -109,6 +115,16 @@ export class VirtualWorld {
     scene.add(this._motes);
   }
 
+  /**
+   * Scroll the ground/motes by (dx, dz) — used during the emote so the world
+   * slides following the character's footwork. The spawn pad stays under her
+   * (it's her pad), only the ground and motes move.
+   */
+  addScroll(dx, dz) {
+    this._scroll.x += dx;
+    this._scroll.y += dz;
+  }
+
   update(delta) {
     this._t += delta;
     // motes drift upward and wrap
@@ -124,5 +140,15 @@ export class VirtualWorld {
     this._ringA.material.opacity = 0.35 + 0.25 * pulse;
     this._ringB.material.opacity = 0.14 + 0.12 * (1 - pulse);
     this._pad.rotation.y += delta * 0.15;
+    // ground scroll — grid wraps within one cell (seamless), motes within their box
+    this._grid.position.x = -wrapTo(this._scroll.x, GRID_CELL);
+    this._grid.position.z = -wrapTo(this._scroll.y, GRID_CELL);
+    this._motes.position.x = -wrapTo(this._scroll.x, PARTICLE_AREA);
+    this._motes.position.z = -wrapTo(this._scroll.y, PARTICLE_AREA);
   }
+}
+
+/** Wrap v into [-size/2, size/2] so a moving plane reads as infinite. */
+function wrapTo(v, size) {
+  return v - Math.round(v / size) * size;
 }

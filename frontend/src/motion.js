@@ -258,6 +258,12 @@ export class MotionController {
     this.impulseRot("spine", "x", OVERSHOOT_AMP, 0.05, OVERSHOOT_RELEASE);
   }
 
+  /** Drop any in-flight one-shot impulses (procedural fidgets, beats, hops)
+   *  so a new deliberate motion like an emote starts from a clean pose. */
+  clearImpulses() {
+    this._impulses.length = 0;
+  }
+
   /** Procedural idle fidget — no animation file needed. */
   proceduralFidget() {
     const pick = Math.floor(Math.random() * 6);
