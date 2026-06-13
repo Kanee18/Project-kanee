@@ -1,50 +1,70 @@
 /**
- * Animation layers 1+2: base idle loop(s) + one-shot gesture clips.
+ * Animation layers 1+2: base loops (idle / state loops) + one-shot gestures.
  *
- * Idles: 2-3 .vrma variations rotated on a random 20-40 s timer with a 0.5 s
- * crossfade. With no idle clips at all, a generated rest-pose clip keeps the
- * mixer driving the pose every frame (no T-pose, and motion.js offsets stay
- * additive).
+ * Base layer: idle variations rotated on a random 20-40 s timer, PLUS
+ * optional state loops (talk_01 / listening_01 / thinking_01.vrma) that
+ * crossfade in as the conversation state changes — supply the files and
+ * they're used automatically; absent, the idle stays (graceful fallback).
+ * With no idle clips at all, a generated rest-pose clip keeps the mixer
+ * driving the pose every frame (no T-pose, motion.js offsets stay additive).
  *
- * Gestures: one-shot clips triggered by gesture tags. The idle keeps looping
- * underneath at full weight; the gesture blends in over it with weight > 1
- * (THREE's mixer normalizes by cumulative weight, so 1.6 vs 1.0 ≈ 62%
- * gesture) and a 0.25 s in/out envelope we drive ourselves. Only rotation
- * tracks are kept: stripping the hips position track stops the model
- * teleporting/sliding, and stripping expression tracks keeps the face owned
- * by expressions.js/lipsync.js. At most ONE pending gesture is queued;
- * extras are dropped. Missing files log once at load and are skipped —
+ * Gestures: one-shot clips blended over the base with a normalization-
+ * corrected envelope (the mixer's visible blend is w/(w+1), so we ramp the
+ * blend FRACTION smoothly and invert it for the weight — ramping w directly
+ * front-loads the motion and reads as a lunge). Context-sync policy:
+ * `playGesture(name, {replace:true})` fades the current gesture out and
+ * starts the new one immediately, so gestures follow the sentence being
+ * SPOKEN. Back-to-back gestures crossfade through the fade-out window
+ * instead of dipping to idle. Only rotation tracks are kept (no hips
+ * translation, no facial tracks). Missing files log once and are skipped —
  * never a crash, never a T-pose.
+ *
+ * Auto talk-gestures are emotion-gated: a small per-emotion clip pool fires
+ * occasionally while she speaks, only when no other gesture is active, and
+ * never for emotions where a cheery clip would clash (sad, angry...).
  */
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { VRMAnimationLoaderPlugin, createVRMAnimationClip } from "@pixiv/three-vrm-animation";
 
-const IDLE_CROSSFADE = 0.8;      // s
+const IDLE_CROSSFADE = 0.8;      // s — between idle variations
 const IDLE_ROTATE_MIN = 20;      // s
 const IDLE_ROTATE_MAX = 40;      // s
+const STATE_FADE = 0.6;          // s — crossfade between state base loops
 const GESTURE_FADE_IN = 0.25;    // s
-const GESTURE_FADE_OUT = 0.5;    // s — soft release back into the idle
-const GESTURE_CANCEL_FADE = 0.3; // s — interrupt fade
-// Peak share of the pose the gesture takes (0.8 ≈ the old weight-4.0 look).
-// IMPORTANT: the mixer normalizes weights, so visible blend = w/(w+1) — a
-// smooth ramp on w is NOT a smooth ramp on screen (50% of the pose change
-// landed in the first quarter of the fade = the "stiff snap"). We therefore
-// ramp the BLEND FRACTION smoothly and invert the normalization for w.
-const GESTURE_MAX_BLEND = 0.8;
+const GESTURE_FADE_OUT = 0.5;    // s — soft release back into the base
+const GESTURE_CANCEL_FADE = 0.3; // s — replace/interrupt fade
+const GESTURE_MAX_BLEND = 0.8;   // peak share of the pose the gesture takes
+const TALK_GESTURE_MIN = 5;      // s between auto conversational gestures
+const TALK_GESTURE_MAX = 9;
+
+/** Auto talk-gesture pools per emotion (filtered to loaded clips at runtime).
+ *  Emotions absent here get none — a cheery clip during [sad] reads wrong. */
+const TALK_POOLS = {
+  neutral: ["nod", "think"],
+  happy: ["nod", "thankful"],
+  excited: ["thankful", "peace"],
+  curious: ["think", "tilt"],
+  smug: ["peace"],
+};
 
 export class AnimationController {
   constructor(vrm) {
     this.vrm = vrm;
     this.mixer = new THREE.AnimationMixer(vrm.scene);
     this._idles = [];
-    this._currentIdle = null;
+    this._currentIdle = null;     // active idle variation (or rest pose)
     this._idleClock = 0;
     this._nextSwitch = randRange(IDLE_ROTATE_MIN, IDLE_ROTATE_MAX);
-    this._gestures = new Map(); // name -> AnimationAction
+    this._stateLoops = {};        // state -> looping AnimationAction
+    this._baseKind = "idle";      // which base layer is active
+    this._gestures = new Map();   // name -> AnimationAction
     this._activeGesture = null;
     this._pendingGesture = null;
     this._fidgetPool = [];
+    this._talking = false;
+    this._talkTimer = 0;
+    this._emotion = "neutral";
     // Hooks for the procedural layer (anticipation dip / release overshoot).
     this.onGestureStart = null;
     this.onGestureEnd = null;
@@ -52,7 +72,7 @@ export class AnimationController {
     this._loader.register((p) => new VRMAnimationLoaderPlugin(p));
   }
 
-  // -- idles -------------------------------------------------------------------
+  // -- base layer: idles + state loops -----------------------------------------
 
   /** Try to load each idle URL; missing/broken files are skipped. */
   async loadIdles(urls) {
@@ -62,16 +82,47 @@ export class AnimationController {
     }
   }
 
+  /**
+   * Optional state base loops, e.g. { speaking: "/animations/talk_01.vrma",
+   * listening: "...", thinking: "..." }. Missing files are skipped; states
+   * without a loop simply keep the idle (procedural poses still apply).
+   */
+  async loadStateLoops(urlByState) {
+    for (const [state, url] of Object.entries(urlByState)) {
+      const clip = await this._loadClip(url);
+      if (clip) this._stateLoops[state] = this.mixer.clipAction(clip);
+    }
+    const have = Object.keys(this._stateLoops);
+    if (have.length) console.info(`animations: state loops loaded: [${have.join(", ")}]`);
+  }
+
   /** Begin idling (call once after loadIdles). */
   start() {
     if (this._idles.length === 0) {
       console.warn("animations: no idle .vrma found — using generated rest pose");
-      this.mixer.clipAction(this._restPoseClip()).play();
+      this._currentIdle = this.mixer.clipAction(this._restPoseClip());
+      this._currentIdle.play();
       return;
     }
     this._currentIdle = this._idles[0];
     this._currentIdle.play();
     console.info(`animations: ${this._idles.length} idle variation(s) loaded`);
+  }
+
+  /** Crossfade the base layer to the state's loop (idle if none provided). */
+  setState(state) {
+    const kind = this._stateLoops[state] ? state : "idle";
+    if (kind === this._baseKind) return;
+    const from = this._baseAction();
+    this._baseKind = kind;
+    const to = this._baseAction();
+    if (!to || from === to) return;
+    to.reset().fadeIn(STATE_FADE).play();
+    if (from) from.fadeOut(STATE_FADE);
+  }
+
+  _baseAction() {
+    return this._baseKind === "idle" ? this._currentIdle : this._stateLoops[this._baseKind];
   }
 
   // -- gestures ----------------------------------------------------------------
@@ -95,22 +146,47 @@ export class AnimationController {
     console.info(`animations: ${this._gestures.size} gesture clip(s) loaded`);
   }
 
-  /** Trigger a gesture by tag name. Queues at most one; drops extras. */
-  playGesture(name) {
-    if (!name) return;
+  /**
+   * Trigger a gesture by tag name. Default: queue at most one, drop extras.
+   * With {replace:true} the current gesture fades out and this one starts
+   * now — used per-sentence so gestures stay in sync with the spoken text.
+   * Returns the clip's duration in seconds (0 if missing/skipped).
+   */
+  playGesture(name, { replace = false } = {}) {
+    if (!name) return 0;
     const action = this._gestures.get(name);
-    if (!action) return; // missing — already logged at load time
+    if (!action) return 0; // missing — already logged at load time
+    const duration = action.getClip().duration;
     if (this._activeGesture) {
-      if (!this._pendingGesture) this._pendingGesture = action;
-      return;
+      if (this._activeGesture === action) return duration;
+      if (replace) {
+        this._fadeOutAction(this._activeGesture, GESTURE_CANCEL_FADE);
+        this._pendingGesture = null;
+        this._startGesture(action);
+      } else if (!this._pendingGesture) {
+        this._pendingGesture = action;
+      }
+      return duration;
     }
     this._startGesture(action);
+    return duration;
   }
 
   /** Names eligible as idle fidgets (silently filtered to loaded clips). */
   setFidgetPool(names) {
     this._fidgetPool = names.filter((n) => this._gestures.has(n));
     console.info(`animations: fidget pool = [${this._fidgetPool.join(", ")}]`);
+  }
+
+  /** Current segment's emotion — picks the auto talk-gesture pool. */
+  setEmotion(name) {
+    this._emotion = name;
+  }
+
+  /** Enable/disable auto conversational gestures (call when speech starts/stops). */
+  setTalking(on) {
+    if (on && !this._talking) this._talkTimer = randRange(TALK_GESTURE_MIN, TALK_GESTURE_MAX);
+    this._talking = on;
   }
 
   /** Hidden idle animation: play one random fidget if nothing else is going on. */
@@ -124,11 +200,14 @@ export class AnimationController {
   cancelGestures() {
     this._pendingGesture = null;
     if (this._activeGesture) {
-      const action = this._activeGesture;
+      this._fadeOutAction(this._activeGesture, GESTURE_CANCEL_FADE);
       this._activeGesture = null;
-      action.fadeOut(GESTURE_CANCEL_FADE);
-      setTimeout(() => action.stop(), GESTURE_CANCEL_FADE * 1000 + 50);
     }
+  }
+
+  _fadeOutAction(action, duration) {
+    action.fadeOut(duration); // THREE fades from the current effective weight
+    setTimeout(() => action.stop(), duration * 1000 + 50);
   }
 
   _startGesture(action) {
@@ -136,12 +215,12 @@ export class AnimationController {
     action.reset();
     action.setEffectiveWeight(0);
     action.play();
-    this.onGestureStart?.(); // anticipation dip overlaps the 0.15 s fade-in
+    this.onGestureStart?.(); // anticipation dip overlaps the fade-in
   }
 
   // -- per-frame ---------------------------------------------------------------
 
-  /** Advance the mixer, the idle-rotation timer, and the gesture envelope. */
+  /** Advance the mixer, gesture envelope, talk gestures, idle rotation. */
   update(delta) {
     this.mixer.update(delta);
 
@@ -149,6 +228,7 @@ export class AnimationController {
       const action = this._activeGesture;
       const duration = action.getClip().duration;
       const t = action.time;
+      const tail = duration - t;
       if (t >= duration - 1e-3) {
         action.stop();
         this._activeGesture = null;
@@ -156,16 +236,36 @@ export class AnimationController {
         const pending = this._pendingGesture;
         this._pendingGesture = null;
         if (pending) this._startGesture(pending);
+      } else if (this._pendingGesture && tail <= GESTURE_FADE_OUT) {
+        // Crossfade gesture→gesture through the fade-out window instead of
+        // dipping back to the base pose between them.
+        this._fadeOutAction(action, tail);
+        const pending = this._pendingGesture;
+        this._pendingGesture = null;
+        this._startGesture(pending);
       } else {
         // Smooth the on-screen blend fraction, then invert w/(w+1) for the
         // mixer weight, so what the eye sees follows smooth01 exactly.
-        const ramp = Math.min(t / GESTURE_FADE_IN, (duration - t) / GESTURE_FADE_OUT, 1);
+        const ramp = Math.min(t / GESTURE_FADE_IN, tail / GESTURE_FADE_OUT, 1);
         const frac = GESTURE_MAX_BLEND * smooth01(Math.max(0, ramp));
         action.setEffectiveWeight(frac / (1 - frac));
       }
     }
 
-    if (this._idles.length > 1) {
+    // Emotion-gated auto conversational gestures while talking.
+    if (this._talking && !this._activeGesture) {
+      this._talkTimer -= delta;
+      if (this._talkTimer <= 0) {
+        this._talkTimer = randRange(TALK_GESTURE_MIN, TALK_GESTURE_MAX);
+        const pool = (TALK_POOLS[this._emotion] ?? []).filter((n) => this._gestures.has(n));
+        if (pool.length > 0) {
+          this.playGesture(pool[Math.floor(Math.random() * pool.length)]);
+        }
+      }
+    }
+
+    // Idle variation rotation — only while the idle base layer is active.
+    if (this._baseKind === "idle" && this._idles.length > 1) {
       this._idleClock += delta;
       if (this._idleClock >= this._nextSwitch) {
         this._idleClock = 0;

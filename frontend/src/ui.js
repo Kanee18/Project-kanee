@@ -9,34 +9,31 @@ export class UI {
     this._conn = document.getElementById("conn");
     this._toasts = document.getElementById("toasts");
     this._assistantBubble = null;
+    this._characterName = document.querySelector("header h1")?.textContent || "Kanee";
   }
 
-  /** Add a user message bubble. Voice transcripts get a mic mark. */
+  /** Stream-chat row: colored name + message. Voice gets a mic mark. */
   addUserMessage(text, { voice = false } = {}) {
-    const div = document.createElement("div");
-    div.className = "msg user";
+    const row = this._makeRow("user", "You");
     if (voice) {
       const mark = document.createElement("span");
       mark.className = "mic-mark";
       mark.textContent = "\u{1F3A4}";
-      div.appendChild(mark);
+      row.appendChild(mark);
     }
-    div.appendChild(document.createTextNode(text));
-    this._log.appendChild(div);
+    row.appendChild(document.createTextNode(text));
     this._scroll();
   }
 
-  /** The next segment starts a fresh assistant bubble. */
+  /** The next segment starts a fresh assistant row. */
   newReply() {
     this._assistantBubble = null;
   }
 
-  /** Append one segment to the current assistant bubble. */
+  /** Append one segment to the current assistant row (reply streams in). */
   addSegment({ text, emotion, gesture }) {
     if (this._assistantBubble === null) {
-      this._assistantBubble = document.createElement("div");
-      this._assistantBubble.className = "msg kanee";
-      this._log.appendChild(this._assistantBubble);
+      this._assistantBubble = this._makeRow("kanee", this._characterName);
     }
     const seg = document.createElement("span");
     seg.className = "seg";
@@ -47,6 +44,18 @@ export class UI {
     seg.appendChild(document.createTextNode(text));
     this._assistantBubble.appendChild(seg);
     this._scroll();
+  }
+
+  _makeRow(kind, name) {
+    const row = document.createElement("div");
+    row.className = `msg ${kind}`;
+    const nameEl = document.createElement("span");
+    nameEl.className = "name";
+    nameEl.textContent = name;
+    row.appendChild(nameEl);
+    this._log.appendChild(row);
+    if (kind === "kanee") this._assistantBubble = row;
+    return row;
   }
 
   setState(value) {

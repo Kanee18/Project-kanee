@@ -19,6 +19,8 @@ import { MotionController } from "./motion.js";
 import { ExpressionController } from "./expressions.js";
 import { LipSync } from "./lipsync.js";
 import { GlitchIntro } from "./intro.js";
+import { CameraDirector } from "./camera.js";
+import { VirtualWorld } from "./world.js";
 import { DebugOverlay } from "./debug.js"; // temporary — Step 2 diagnosis
 
 // Avatar modules appear here once the VRM finishes loading; everything that
@@ -29,6 +31,7 @@ const avatar = {
   motion: null,
   expressions: null,
   lipsync: null,
+  cameraDirector: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -39,11 +42,15 @@ class SegmentPlayer {
   /**
    * @param onChange       playing-state changed (drives the state pill)
    * @param onSegmentStart a segment's audio (or text-only hold) just started
+   * @param onSegmentAudio (seg, duration) — audio decoded, about to play
+   * @param onAudioEnd     a segment's audio stopped (ended or flushed)
    * @param onAnalyser     the shared AnalyserNode exists now (lazy)
    */
-  constructor({ onChange, onSegmentStart, onAnalyser }) {
+  constructor({ onChange, onSegmentStart, onSegmentAudio, onAudioEnd, onAnalyser }) {
     this._onChange = onChange;
     this._onSegmentStart = onSegmentStart;
+    this._onSegmentAudio = onSegmentAudio;
+    this._onAudioEnd = onAudioEnd;
     this._onAnalyser = onAnalyser;
     this._queue = [];
     this._busy = false;
@@ -79,6 +86,7 @@ class SegmentPlayer {
         /* already stopped */
       }
       this._source = null;
+      this._onAudioEnd?.();
     }
     this._busy = false;
     this._onChange();
@@ -117,11 +125,13 @@ class SegmentPlayer {
         source.onended = () => {
           if (this._source !== source) return; // flushed
           this._source = null;
+          this._onAudioEnd?.();
           this._busy = false;
           this._onChange();
           this._next();
         };
         this._source = source;
+        this._onSegmentAudio?.(seg, buffer.duration);
         source.start();
         return;
       } catch (err) {
@@ -155,7 +165,8 @@ async function initAvatar(ui) {
   viewport.appendChild(renderer.domElement);
 
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x101018);
+  scene.background = new THREE.Color(0x05050a);
+  const world = new VirtualWorld(scene); // sky, grid floor, pad, particles
 
   const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 20);
   camera.position.set(0, 1.32, 1.4); // provisional — reframed from the model after load
@@ -214,6 +225,11 @@ async function initAvatar(ui) {
       controls.update();
     }
 
+    // Full-body framing for emotes is computed from the model's bounds.
+    const director = new CameraDirector(camera, controls);
+    director.frameFromModel(vrm.scene);
+    avatar.cameraDirector = director;
+
     const animations = new AnimationController(vrm);
     await animations.loadIdles([
       "/animations/idle_01.vrma",
@@ -238,10 +254,19 @@ async function initAvatar(ui) {
       thankful: "/animations/thankful.vrma",
       thoughtful_nod: "/animations/thoughtful_nod.vrma",
       spin: "/animations/spin.vrma",
+      // emote clip for the emote button (assets/emotes/, space URL-encoded)
+      kawaii: "/emotes/Kawaii%20Kaiwai.vrma",
     });
     // Hidden idle animations: occasionally play one of these when she has
     // been still for a while, so she never reads as frozen.
     animations.setFidgetPool(["peace", "think", "thankful", "thoughtful_nod", "spin"]);
+    // Optional state base loops — supply these files and they're used
+    // automatically (graceful fallback to idle while absent).
+    await animations.loadStateLoops({
+      speaking: "/animations/talk_01.vrma",
+      listening: "/animations/listening_01.vrma",
+      thinking: "/animations/thinking_01.vrma",
+    });
 
     avatar.vrm = vrm;
     avatar.animations = animations;
@@ -269,7 +294,10 @@ async function initAvatar(ui) {
   const clock = new THREE.Clock();
   renderer.setAnimationLoop(() => {
     const delta = clock.getDelta();
-    controls.update();
+    // The cinematic director owns the camera while moving; otherwise OrbitControls.
+    const cinematic = avatar.cameraDirector ? avatar.cameraDirector.update(delta) : false;
+    if (!cinematic) controls.update();
+    world.update(delta);                                    // backdrop motes/pad
     if (avatar.animations) avatar.animations.update(delta); // layer 1+2: mixer
     if (avatar.motion) avatar.motion.update(delta);         // layer 3: procedural additive
     if (avatar.expressions) avatar.expressions.update(delta);
@@ -306,6 +334,7 @@ let calmTimer = null;
 const player = new SegmentPlayer({
   onChange: () => {
     refreshState();
+    avatar.animations?.setTalking(player.playing); // hands gesture while audio plays
     if (!player.playing) {
       // Queue drained naturally: linger, then ease back to neutral.
       clearTimeout(calmTimer);
@@ -326,7 +355,18 @@ const player = new SegmentPlayer({
     // Emotion and gesture apply the moment the segment's audio starts (protocol).
     avatar.expressions?.setEmotion(seg.emotion);
     avatar.motion?.setEmotion(seg.emotion);
-    avatar.animations?.playGesture(seg.gesture);
+    avatar.animations?.setEmotion(seg.emotion);
+    // replace:true keeps gestures in sync with the sentence being SPOKEN —
+    // a leftover gesture from the previous sentence fades out instead of
+    // delaying this one out of context.
+    if (seg.gesture) avatar.animations?.playGesture(seg.gesture, { replace: true });
+  },
+  onSegmentAudio: (seg, duration) => {
+    // The segment's text drives the mouth-shape track for its audio.
+    avatar.lipsync?.beginSegment(seg.text, duration);
+  },
+  onAudioEnd: () => {
+    avatar.lipsync?.endSegment();
   },
   onAnalyser: (analyser) => {
     if (avatar.lipsync) avatar.lipsync.setAnalyser(analyser);
@@ -339,7 +379,8 @@ function refreshState() {
   if (micHeld) state = "listening";
   else if (player.playing) state = "speaking";
   ui.setState(state);
-  avatar.motion?.setState(state); // attentive lean-in / think pose / etc.
+  avatar.motion?.setState(state);     // attentive lean-in / think pose / etc.
+  avatar.animations?.setState(state); // state base loops (talk/listen/think) if provided
 }
 
 ws.onConnection((ok) => {
@@ -383,6 +424,30 @@ function sendOrToast(msg) {
 }
 
 // ---------------------------------------------------------------------------
+// emote button (left of the message bar) — plays the Kawaii emote + a brief
+// happy expression
+// ---------------------------------------------------------------------------
+
+let emoteCalmTimer = null;
+
+document.getElementById("emote").addEventListener("click", () => {
+  const dur = avatar.animations?.playGesture("kawaii") || 3;
+  avatar.expressions?.playEmote(dur); // scripted idol wink → happy smile
+  avatar.motion?.setEmotion("happy"); // happy body posture (squint is suppressed during the wink)
+  // Pull the camera out to a full-body shot for the length of the clip
+  // (+ time for the ease-out and ease-back) so the whole emote is visible.
+  avatar.cameraDirector?.showFull(dur + 0.3);
+  clearTimeout(emoteCalmTimer);
+  emoteCalmTimer = setTimeout(() => {
+    // Don't stomp a reply that started playing in the meantime.
+    if (!player.playing) {
+      avatar.expressions?.reset();
+      avatar.motion?.setEmotion("neutral");
+    }
+  }, (dur + 0.6) * 1000);
+});
+
+// ---------------------------------------------------------------------------
 // idle fidgets — after 15-25 s of true idle, play either a hidden gesture
 // clip or a procedural micro-fidget (hand shift / shrug / pondering tilt)
 // ---------------------------------------------------------------------------
@@ -391,7 +456,7 @@ let lastActivityAt = Date.now();
 let nextFidgetMs = randFidgetDelay();
 
 function randFidgetDelay() {
-  return 15_000 + Math.random() * 10_000;
+  return 12_000 + Math.random() * 8_000;
 }
 
 setInterval(() => {

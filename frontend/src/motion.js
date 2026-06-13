@@ -57,8 +57,17 @@ const TILT_TAU = 0.22;          // s — eases in/out over ~0.5 s
 const TALK_TAU = 0.35;          // s — speech envelope smoothing
 const SWAY_HEAD = 0.1;          // rad — head bob/tilt range while speaking
 const SWAY_SPINE = 0.06;        // rad — body sway while speaking
-const HANDS = 0.15;             // master gain for micro hand gestures
+const HANDS = 0.18;             // master gain for micro hand gestures
 const SHOULDER_TALK = 0.03;     // rad — shoulders ride the audio level
+
+// hand "beat" gestures: forearms lift and accent in rhythm while talking —
+// this is what makes her look like she's talking WITH her hands.
+const BEAT_GAP_MIN = 0.7;       // s between rhythmic beats while speaking
+const BEAT_GAP_MAX = 1.5;
+const BEAT_ATTACK = 0.1;        // s — quick raise
+const BEAT_RELEASE = 0.35;      // s — soft settle
+const BEAT_MIN = 0.14;          // rad forearm raise (random per beat)
+const BEAT_MAX = 0.26;
 
 // -- audio emphasis ----------------------------------------------------------------
 const EMPHASIS_LEVEL = 0.7;     // level above this = emphasis (nod + brow pulse)
@@ -90,10 +99,12 @@ const OVERSHOOT_RELEASE = 0.35; // s
 // -- blink / squint -----------------------------------------------------------------
 const BLINK_MIN = 2;            // s
 const BLINK_MAX = 6;
-const BLINK_CLOSE = 0.07;       // s
-const BLINK_OPEN = 0.11;        // s
+const BLINK_CLOSE = 0.06;       // s — lids drop fast...
+const BLINK_OPEN = 0.18;        // s — ...and reopen slower (eased: organic, not metronome)
 const DOUBLE_BLINK_CHANCE = 0.2;
 const SQUINT = 0.25;            // lid weight held while happy/excited (smiling eyes)
+const LID_FOLLOW = 1.2;         // lids lower a touch when the gaze drops (subtle pro touch)
+const LID_FOLLOW_MAX = 0.18;
 
 // -- gaze ---------------------------------------------------------------------------
 const GAZE_LAG = 5;             // 1/s — eyes chase the camera
@@ -164,6 +175,7 @@ export class MotionController {
     this._talk = 0;
     this._slowLevel = 0;
     this._spikeCooldown = 0;
+    this._beatTimer = randRange(BEAT_GAP_MIN, BEAT_GAP_MAX);
     this._emotion = "neutral";
     this._state = "idle";
     this._camPos = new THREE.Vector3();
@@ -224,14 +236,16 @@ export class MotionController {
     this._state = state in STATE_POSE ? state : "idle";
   }
 
-  /** One-shot rotation envelope: smooth attack, smooth release, then gone. */
-  impulseRot(bone, axis, amp, attack, release) {
-    this._impulses.push({ bone, axis, amp, attack, release, t: 0, kind: "rot" });
+  /** One-shot rotation envelope: smooth attack, smooth release, then gone.
+   *  Optional `delay` (s) lets multi-part motions sequence (e.g. a sigh's
+   *  shoulder drop after the chest swell). */
+  impulseRot(bone, axis, amp, attack, release, delay = 0) {
+    this._impulses.push({ bone, axis, amp, attack, release, t: -delay, kind: "rot" });
   }
 
   /** One-shot position envelope (e.g. the excited hip hop). */
-  impulsePos(bone, axis, amp, attack, release) {
-    this._impulses.push({ bone, axis, amp, attack, release, t: 0, kind: "pos" });
+  impulsePos(bone, axis, amp, attack, release, delay = 0) {
+    this._impulses.push({ bone, axis, amp, attack, release, t: -delay, kind: "pos" });
   }
 
   /** Tiny preparatory counter-dip right as a gesture clip starts. */
@@ -246,7 +260,7 @@ export class MotionController {
 
   /** Procedural idle fidget — no animation file needed. */
   proceduralFidget() {
-    const pick = Math.floor(Math.random() * 3);
+    const pick = Math.floor(Math.random() * 6);
     if (pick === 0) {
       // hand clasp shift
       this.impulseRot("leftHand", "z", 0.18, 0.3, 0.9);
@@ -257,9 +271,31 @@ export class MotionController {
       // little shrug
       this.impulseRot("leftShoulder", "z", 0.05, 0.25, 0.7);
       this.impulseRot("rightShoulder", "z", -0.05, 0.25, 0.7);
-    } else {
+    } else if (pick === 2) {
       // slow pondering head tilt
       this.impulseRot("neck", "z", (Math.random() < 0.5 ? 1 : -1) * 0.09, 0.45, 1.3);
+    } else if (pick === 3) {
+      // sigh: chest swell + shoulders rise, then everything settles down
+      this.impulseRot("chest", "x", 0.05, 0.7, 0.9);
+      this.impulseRot("leftShoulder", "z", 0.05, 0.7, 0.5);
+      this.impulseRot("rightShoulder", "z", -0.05, 0.7, 0.5);
+      this.impulseRot("leftShoulder", "z", -0.04, 0.3, 1.0, 0.9);
+      this.impulseRot("rightShoulder", "z", 0.04, 0.3, 1.0, 0.9);
+      this.impulseRot("head", "x", 0.05, 0.5, 1.2, 0.9);
+    } else if (pick === 4) {
+      // stretch: arms swing slightly up/out, back arches
+      this.impulseRot("leftUpperArm", "z", 0.3, 0.6, 1.1);
+      this.impulseRot("rightUpperArm", "z", -0.3, 0.6, 1.1);
+      this.impulseRot("spine", "x", -0.06, 0.6, 1.1);
+      this.impulseRot("head", "x", -0.05, 0.6, 1.1);
+    } else {
+      // glance around: head turns aside, eyes lead the way
+      const side = Math.random() < 0.5 ? -1 : 1;
+      this.impulseRot("head", "y", side * 0.22, 0.5, 1.6);
+      this.impulseRot("neck", "y", side * 0.08, 0.5, 1.6);
+      this._wanderOn = true;
+      this._wanderDir.set(side * 0.6, 0.05, 0);
+      this._wanderTimer = 1.4;
     }
   }
 
@@ -273,6 +309,7 @@ export class MotionController {
     this._weightShift(delta);
     this._idleTilt(delta);
     this._sway();
+    this._handBeats(delta);
     this._emphasis(delta);
     this._posture(delta);
     this._impulseUpdate(delta);
@@ -370,14 +407,59 @@ export class MotionController {
     if (this._spikeCooldown > 0) return;
     const lvl = this._speechLevel();
     if (lvl > EMPHASIS_LEVEL) {
-      // loud emphasis: micro-nod + eyebrow pulse
+      // loud emphasis: micro-nod + eyebrow pulse + a hand beat for accent
       this.impulseRot("head", "x", NOD_AMP, NOD_ATTACK, NOD_RELEASE);
       this._onEmphasis();
+      this._beat();
       this._spikeCooldown = SPIKE_COOLDOWN;
     } else if (lvl - this._slowLevel > SPIKE_JUMP && lvl > 0.4) {
       // sudden syllable spike: micro-nod only
       this.impulseRot("head", "x", NOD_AMP, NOD_ATTACK, NOD_RELEASE);
       this._spikeCooldown = SPIKE_COOLDOWN;
+    }
+  }
+
+  /**
+   * Rhythmic hand beats while talking: every ~1 s the forearms/hands lift and
+   * settle, so she gestures continuously between the accent beats fired on
+   * emphasized words. Uses the same arm axes as _sway() (validated on screen),
+   * via the impulse system so each beat eases in and out.
+   */
+  _handBeats(delta) {
+    if (this._talk < 0.2) {
+      this._beatTimer = randRange(BEAT_GAP_MIN, BEAT_GAP_MAX);
+      return;
+    }
+    this._beatTimer -= delta;
+    if (this._beatTimer <= 0) {
+      this._beat();
+      this._beatTimer = randRange(BEAT_GAP_MIN, BEAT_GAP_MAX);
+    }
+  }
+
+  /** One hand-gesture beat: both forearms, or a single hand, raise-and-settle. */
+  _beat() {
+    const amp = BEAT_MIN + Math.random() * (BEAT_MAX - BEAT_MIN);
+    const at = BEAT_ATTACK;
+    const re = BEAT_RELEASE;
+    if (Math.random() < 0.6) {
+      // both hands (mirrored, matching the _sway sign convention)
+      this.impulseRot("leftLowerArm", "z", amp, at, re);
+      this.impulseRot("rightLowerArm", "z", -amp, at, re);
+      this.impulseRot("leftUpperArm", "z", amp * 0.45, at, re);
+      this.impulseRot("rightUpperArm", "z", -amp * 0.45, at, re);
+      this.impulseRot("leftHand", "z", amp * 0.6, at, re);
+      this.impulseRot("rightHand", "z", -amp * 0.6, at, re);
+    } else {
+      // one hand, bigger
+      const left = Math.random() < 0.5;
+      const s = left ? 1 : -1;
+      const lower = left ? "leftLowerArm" : "rightLowerArm";
+      const upper = left ? "leftUpperArm" : "rightUpperArm";
+      const hand = left ? "leftHand" : "rightHand";
+      this.impulseRot(lower, "z", s * amp * 1.25, at, re);
+      this.impulseRot(upper, "z", s * amp * 0.55, at, re);
+      this.impulseRot(hand, "z", s * amp * 0.8, at, re);
     }
   }
 
@@ -414,6 +496,7 @@ export class MotionController {
     for (let i = this._impulses.length - 1; i >= 0; i--) {
       const p = this._impulses[i];
       p.t += delta;
+      if (p.t <= 0) continue; // still in its delay
       let w;
       if (p.t < p.attack) {
         w = smooth01(p.t / p.attack);
@@ -456,6 +539,9 @@ export class MotionController {
     }
     // smiling eyes: hold a partial lid close while happy/excited
     const squint = this._emotion === "happy" || this._emotion === "excited" ? SQUINT : 0;
+    // lid follow: eyes looking down lower the lids a touch
+    const gazeDown = -(this._gazeOffset.y + this._sacOffset.y);
+    const lidFollow = Math.min(LID_FOLLOW_MAX, Math.max(0, gazeDown * LID_FOLLOW));
     let lid = 0;
     if (this._blinkT === null) {
       this._blinkWait -= delta;
@@ -478,7 +564,7 @@ export class MotionController {
         lid = w;
       }
     }
-    em.setValue("blink", Math.max(lid, squint));
+    em.setValue("blink", Math.max(lid, squint, lidFollow));
   }
 
   // -- look-at ---------------------------------------------------------------------------
@@ -573,11 +659,12 @@ export class MotionController {
   }
 }
 
-/** 0→1→0 lid weight over the blink; null when the blink has finished. */
+/** 0→1→0 lid weight over the blink; null when the blink has finished.
+ *  Smooth-stepped both ways (linear lid ramps read as mechanical). */
 function blinkEnvelope(t) {
   if (t < 0) return 0;
-  if (t < BLINK_CLOSE) return t / BLINK_CLOSE;
-  if (t < BLINK_CLOSE + BLINK_OPEN) return 1 - (t - BLINK_CLOSE) / BLINK_OPEN;
+  if (t < BLINK_CLOSE) return smooth01(t / BLINK_CLOSE);
+  if (t < BLINK_CLOSE + BLINK_OPEN) return 1 - smooth01((t - BLINK_CLOSE) / BLINK_OPEN);
   return null;
 }
 
