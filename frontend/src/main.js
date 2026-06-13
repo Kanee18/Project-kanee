@@ -394,11 +394,29 @@ const debug = new DebugOverlay();
 let backendState = "idle";
 let micHeld = false;
 let emoteActive = false; // true while an emote clip plays — drives the foot→ground scroll
-const HOLOGRAM_LINGER = 5000; // ms the answer screen stays up after she finishes speaking
+const HOLOGRAM_DELAY = 8160;  // ms into answare_math when the hand reaches the display pose
+const HOLOGRAM_LINGER = 5000; // ms the answer screen stays up after it appears
 let pendingMath = null;  // {expr, answer} from a "math" event, until the reply's first segment
-let mathAnswer = null;   // {expr, answer} held through the reply, shown at reply_done
+let mathAnswer = null;   // {expr, answer} held until the hologram appears (8.16 s into the clip)
 let mathActive = false;  // presenting a math answer (hold pose/expression, no per-sentence gestures)
-let mathHoldTimer = null;
+let mathHoldTimer = null; // delay-to-show, then reused as the linger-to-hide timer
+
+/** The hologram appears partway through answare_math (hand in display pose), then lingers. */
+function showMathHologram() {
+  if (!mathActive || !mathAnswer) return;
+  avatar.hologram?.show(mathAnswer.expr, mathAnswer.answer, avatar.vrm);
+  mathAnswer = null;
+  clearTimeout(mathHoldTimer);
+  mathHoldTimer = setTimeout(() => {
+    mathHoldTimer = null;
+    mathActive = false;
+    avatar.hologram?.hide();
+    if (!player.playing) {
+      avatar.expressions?.reset();
+      avatar.motion?.setEmotion("neutral");
+    }
+  }, HOLOGRAM_LINGER);
+}
 
 /** Tear down the math presentation immediately (interrupt / error / new msg). */
 function endMath() {
@@ -453,12 +471,14 @@ const player = new SegmentPlayer({
     // Math answer: on the reply's first segment, present with answare_math
     // + the floating hologram showing the answer.
     if (pendingMath) {
-      // She presents (answare_math) while speaking; the hologram itself appears
-      // to her right AFTER she finishes (handled in reply_done).
+      // Play answare_math now; the hologram pops in 8.16 s later, when her hand
+      // reaches the display pose in the clip.
       mathActive = true;
       mathAnswer = pendingMath;
       pendingMath = null;
       avatar.animations?.playGesture("answare_math", { replace: true });
+      clearTimeout(mathHoldTimer);
+      mathHoldTimer = setTimeout(showMathHologram, HOLOGRAM_DELAY);
       return; // hold the presenting pose; skip the per-sentence gesture
     }
     // While presenting a math answer, keep the hand on the hologram (don't
@@ -506,8 +526,8 @@ ws.on("state", (msg) => {
 });
 ws.on("transcript", (msg) => ui.addUserMessage(msg.text, { voice: true }));
 ws.on("math", (msg) => {
-  // Arithmetic question detected; the hologram + answare_math fire when the
-  // reply's first segment arrives (so they sync with her speaking).
+  // Arithmetic question detected; answare_math + the timed hologram fire when
+  // the reply's first segment arrives.
   pendingMath = { expr: msg.expr, answer: msg.answer };
 });
 ws.on("segment", (msg) => {
@@ -515,24 +535,9 @@ ws.on("segment", (msg) => {
   player.enqueue(msg);
 });
 ws.on("reply_done", () => {
-  // After she finishes speaking, pop the answer hologram to her right and let
-  // it linger so it's readable, then fade.
-  if (mathActive && mathAnswer) {
-    avatar.hologram?.show(mathAnswer.expr, mathAnswer.answer, avatar.vrm);
-    mathAnswer = null;
-    clearTimeout(mathHoldTimer);
-    mathHoldTimer = setTimeout(() => {
-      mathHoldTimer = null;
-      mathActive = false;
-      avatar.hologram?.hide();
-      if (!player.playing) {
-        avatar.expressions?.reset();
-        avatar.motion?.setEmotion("neutral");
-      }
-    }, HOLOGRAM_LINGER);
-  } else {
-    pendingMath = null; // unconsumed (e.g. empty reply)
-  }
+  // The hologram is on its own 8.16 s timer from when the animation started,
+  // so nothing to show here — just drop a math answer that never got a segment.
+  if (!mathActive) pendingMath = null;
 });
 ws.on("error", (msg) => {
   ui.toast(msg.message);

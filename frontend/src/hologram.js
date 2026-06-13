@@ -1,15 +1,18 @@
 /**
- * Holographic answer screen — a small DOM panel styled as a floating hologram
- * that appears to the right of the character (after she finishes speaking the
- * math answer) and stays anchored there in world space as the camera orbits.
- * Position is a fixed point beside her head, captured when shown — it does NOT
- * follow the hand.
+ * Holographic answer screen — a DOM panel styled as a floating hologram that
+ * appears next to the character's right hand (after she finishes speaking the
+ * math answer). The anchor is captured from the hand's position at the moment
+ * it's shown and held fixed in world space — so it sits by the hand but does
+ * NOT chase it frame-by-frame as the animation moves.
  */
 import * as THREE from "three";
 
-const RIGHT_OFFSET = 0.45; // m to the viewer's right of the head (flip sign for her other side)
-const DOWN_OFFSET = 0.1;   // m below head height (toward the shoulder)
-const FWD_OFFSET = 0.15;   // m toward the camera
+// Offset from the right hand (m). HAND_SIDE is the horizontal placement:
+// negative = screen-left, positive = screen-right (the hand is usually near
+// center, so a large magnitude pushes the panel clearly to one side).
+const HAND_SIDE = -0.04;
+const HAND_UP = 0.08;
+const HAND_FWD = 0.12;
 
 export class Hologram {
   constructor(viewport) {
@@ -23,23 +26,23 @@ export class Hologram {
     viewport.appendChild(this._el);
 
     this._anchor = new THREE.Vector3(); // fixed world point for the current showing
-    this._head = new THREE.Vector3();
+    this._hand = new THREE.Vector3();
     this._proj = new THREE.Vector3();
     this.visible = false;
   }
 
-  /** Show the answer beside the character; anchor is captured now and held. */
+  /** Show the answer next to the right hand; anchor is captured now and held. */
   show(expr, answer, vrm) {
     this._exprEl.textContent = expr;
     this._ansEl.textContent = `= ${answer}`;
 
-    const head = vrm?.humanoid?.getRawBoneNode("head");
-    if (head) head.getWorldPosition(this._head);
-    else this._head.set(0, 1.3, 0);
+    const hand = vrm?.humanoid?.getRawBoneNode("rightHand");
+    if (hand) hand.getWorldPosition(this._hand);
+    else this._hand.set(0.25, 1.0, 0); // fallback if the bone is missing
     this._anchor.set(
-      this._head.x + RIGHT_OFFSET,
-      this._head.y - DOWN_OFFSET,
-      this._head.z + FWD_OFFSET,
+      this._hand.x + HAND_SIDE,
+      this._hand.y + HAND_UP,
+      this._hand.z + HAND_FWD,
     );
 
     this._el.hidden = false;
