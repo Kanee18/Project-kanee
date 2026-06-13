@@ -37,6 +37,10 @@ export class GlitchIntro {
     this._t = 0;
     this._flickerT = 0;
     this.active = false;
+    this._welcomed = false;
+    // Fired once the moment she becomes solid (overlaps the glitch settling),
+    // so the welcome wave reads as "she arrives and greets you".
+    this.onWelcome = null;
   }
 
   /** Start the intro; `target` is the VRM root (hidden until materialize). */
@@ -45,6 +49,7 @@ export class GlitchIntro {
     target.visible = false;
     this._t = 0;
     this._flickerT = 0;
+    this._welcomed = false;
 
     this._composer = new EffectComposer(this._renderer);
     const size = this._renderer.getSize(new THREE.Vector2());
@@ -80,6 +85,10 @@ export class GlitchIntro {
       m.position.x = 0;
       m.scale.y = 1;
       this._glitch.goWild = false;
+      if (!this._welcomed) {
+        this._welcomed = true;
+        this.onWelcome?.(); // wave hello while the last glitches clear
+      }
     }
 
     if (t >= DURATION) this._finish();

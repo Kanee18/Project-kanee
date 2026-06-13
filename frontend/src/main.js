@@ -283,6 +283,8 @@ async function initAvatar(ui) {
     animations.onGestureEnd = () => avatar.motion?.gestureRelease();
     if (player.analyser) avatar.lipsync.setAnalyser(player.analyser);
     debug.attach(vrm, () => avatar.lipsync?.level ?? 0);
+    // Welcome: as she finishes materializing, wave hello with a smile.
+    intro.onWelcome = playWelcome;
     intro.begin(vrm.scene); // glitch-materialize instead of popping in
     console.info("avatar ready");
   } catch (err) {
@@ -492,6 +494,20 @@ function sendOrToast(msg) {
 
 let emoteCalmTimer = null;
 let emoteActiveTimer = null;
+
+/** Welcome greeting on first materialize: wave hello with a smile. */
+function playWelcome() {
+  const dur = avatar.animations?.playGesture("wave", { replace: true }) || 2.5;
+  avatar.expressions?.setEmotion("happy");
+  avatar.motion?.setEmotion("happy");
+  clearTimeout(emoteCalmTimer);
+  emoteCalmTimer = setTimeout(() => {
+    if (!player.playing) {
+      avatar.expressions?.reset();
+      avatar.motion?.setEmotion("neutral");
+    }
+  }, (dur + 0.8) * 1000);
+}
 
 document.getElementById("emote").addEventListener("click", () => {
   // Clear any hidden animation in progress so the emote doesn't collide with

@@ -222,6 +222,10 @@ export class MotionController {
     this._blinkT = null;
     this._blinkAgain = false;
     this.suppressBlink = false; // expressions.js sets this during [surprised]
+    // 0..1, set by expressions.js: how much the active emotion already closes
+    // the eyes (e.g. a happy ^_^ smile). Scales the auto-blink down so she
+    // doesn't "blink" eyes the expression has already shut.
+    this.blinkSuppress = 0;
 
     // head-follow: main.js sets the target yaw (rad) toward the orbit camera.
     this.headFollowTarget = 0;
@@ -597,7 +601,9 @@ export class MotionController {
         lid = w;
       }
     }
-    em.setValue("blink", Math.max(lid, squint, lidFollow));
+    // Scale the blink down when the emotion already closes the eyes — no
+    // blinking on an already-shut ^_^ smile.
+    em.setValue("blink", Math.max(lid, squint, lidFollow) * (1 - this.blinkSuppress));
   }
 
   // -- look-at ---------------------------------------------------------------------------

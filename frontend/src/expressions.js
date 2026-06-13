@@ -38,7 +38,7 @@ const EMOTE_SMILE = 0.65;
 /** protocol emotion → { vrmExpression: weight } */
 const EMOTION_MAP = {
   neutral: {},
-  happy: { happy: 0.85 },
+  happy: { happy: 1.0 },
   excited: { happy: 1.0, surprised: 0.2 },
   sad: { sad: 0.9 },
   angry: { angry: 0.85 },
@@ -137,6 +137,7 @@ export class ExpressionController {
     // Ease the emotion scale toward speaking/not (emote holds full emotion).
     const scaleTarget = this.speaking && !this._emote ? SPEAK_EMOTION_SCALE : 1;
     this._speechScale += (scaleTarget - this._speechScale) * (1 - Math.exp(-delta / SPEAK_SCALE_TAU));
+    let eyeClose = 0; // how much the active emotion already shuts the eyes
     for (const name of this._available) {
       const s = this._weights[name];
       springTo(s, this._targets[name], FADE_SETTLE, 1.0, delta);
@@ -146,7 +147,12 @@ export class ExpressionController {
         value = Math.max(value, EMPHASIS_BROW * this._emphasis);
       }
       em.setValue(name, value);
+      // happy/excited close the eyes into a smile; relaxed narrows them a little
+      if (name === "happy") eyeClose = Math.max(eyeClose, value);
+      else if (name === "relaxed") eyeClose = Math.max(eyeClose, value * 0.5);
     }
+    // Tell the auto-blink to back off when the eyes are already shut by emotion.
+    if (this.motion) this.motion.blinkSuppress = this._emote ? 0 : eyeClose;
     // Emote: hold the smile, keep the eyes fully open (no blink, no winks).
     // Runs after motion.js in the loop, so pinning the blink channels to 0
     // here overrides the suspended auto-blink for the emote's duration.
