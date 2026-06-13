@@ -20,6 +20,13 @@
 const FADE_SETTLE = 0.25;    // s — expression crossfade settle time
 const EMPHASIS_BROW = 0.2;   // 'surprised' weight at full emphasis
 const EMPHASIS_TAU = 0.25;   // s — emphasis pulse decay
+// While speaking, ease emotion presets down to this fraction. On this model
+// each emotion morph bundles a MOUTH shape (smile/frown) + an EYE shape
+// (squint), so at full weight the smile fights the talking visemes (locked
+// mouth) and the squint over-closes the eyes. Backing it off frees the mouth
+// for visemes and opens the eyes; emotion returns to full when she stops.
+const SPEAK_EMOTION_SCALE = 0.5;
+const SPEAK_SCALE_TAU = 0.18; // s — ease in/out of the speaking scale
 
 // Emote face: a held smile and NO eye animation at all (user call after the
 // wink choreography kept misbehaving) — auto-blink is suspended and all blink
@@ -54,6 +61,8 @@ export class ExpressionController {
     this._targets = {};
     this._emphasis = 0;
     this._emote = null; // { t, dur } while the idol-wink emote is running
+    this.speaking = false; // set by main.js; scales emotion down so visemes lead
+    this._speechScale = 1;
 
     // Which mapped expressions does this model actually have?
     const em = vrm.expressionManager;
@@ -125,11 +134,15 @@ export class ExpressionController {
     if (!em) return;
     delta = Math.min(delta, 0.05); // tab-away dt spike would explode the springs
     this._emphasis *= Math.exp(-delta / EMPHASIS_TAU);
+    // Ease the emotion scale toward speaking/not (emote holds full emotion).
+    const scaleTarget = this.speaking && !this._emote ? SPEAK_EMOTION_SCALE : 1;
+    this._speechScale += (scaleTarget - this._speechScale) * (1 - Math.exp(-delta / SPEAK_SCALE_TAU));
     for (const name of this._available) {
       const s = this._weights[name];
       springTo(s, this._targets[name], FADE_SETTLE, 1.0, delta);
-      let value = Math.min(1, Math.max(0, s.x));
+      let value = Math.min(1, Math.max(0, s.x)) * this._speechScale;
       if (name === "surprised") {
+        // emphasis brow pulse stays at full strength (not scaled by speech)
         value = Math.max(value, EMPHASIS_BROW * this._emphasis);
       }
       em.setValue(name, value);

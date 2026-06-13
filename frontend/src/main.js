@@ -181,6 +181,7 @@ async function initAvatar(ui) {
   controls.enablePan = false;
 
   const intro = new GlitchIntro(renderer, scene, camera);
+  let frontAzimuth = controls.getAzimuthalAngle(); // camera angle where she faces front
 
   const key = new THREE.DirectionalLight(0xffffff, 1.6);
   key.position.set(0.6, 1.8, 1.5);
@@ -229,6 +230,7 @@ async function initAvatar(ui) {
     const director = new CameraDirector(camera, controls);
     director.frameFromModel(vrm.scene);
     avatar.cameraDirector = director;
+    frontAzimuth = controls.getAzimuthalAngle(); // re-capture after framing
 
     const animations = new AnimationController(vrm);
     await animations.loadIdles([
@@ -322,13 +324,39 @@ async function initAvatar(ui) {
     _prevFoot.copy(_footNow);
   }
 
+  // Head-follow: she turns toward the orbit camera up to a comfortable limit,
+  // then eases back to front as the camera passes around behind her.
+  const HEAD_FOLLOW_MAX = 68;    // deg — most she'll turn her head
+  const HEAD_RETURN_START = 95;  // deg — camera angle where she starts facing front again
+  const HEAD_RETURN_END = 150;   // deg — fully front again past here
+  const HEAD_FOLLOW_SIGN = 1;    // flip to -1 if she turns AWAY from the camera
+  function updateHeadFollow() {
+    if (!avatar.motion) return;
+    let theta = controls.getAzimuthalAngle() - frontAzimuth;
+    theta = Math.atan2(Math.sin(theta), Math.cos(theta)); // wrap to [-π, π]
+    const aDeg = (Math.abs(theta) * 180) / Math.PI;
+    let magDeg;
+    if (aDeg <= HEAD_RETURN_START) {
+      magDeg = Math.min(aDeg, HEAD_FOLLOW_MAX);
+    } else if (aDeg < HEAD_RETURN_END) {
+      const base = Math.min(HEAD_RETURN_START, HEAD_FOLLOW_MAX);
+      const t = (aDeg - HEAD_RETURN_START) / (HEAD_RETURN_END - HEAD_RETURN_START);
+      magDeg = base * (1 - t * t * (3 - 2 * t)); // smoothstep back to 0
+    } else {
+      magDeg = 0; // behind her — face front
+    }
+    avatar.motion.headFollowTarget =
+      Math.sign(theta) * ((magDeg * Math.PI) / 180) * HEAD_FOLLOW_SIGN;
+  }
+
   const clock = new THREE.Clock();
   renderer.setAnimationLoop(() => {
     const delta = clock.getDelta();
     // The cinematic director owns the camera while moving; otherwise OrbitControls.
     const cinematic = avatar.cameraDirector ? avatar.cameraDirector.update(delta) : false;
     if (!cinematic) controls.update();
-    scrollWorldFromFeet();                                  // reads last frame's foot matrices
+    updateHeadFollow();                                    // head tracks the orbit camera
+    scrollWorldFromFeet();                                 // reads last frame's foot matrices
     world.update(delta);                                    // backdrop motes/pad/scroll
     if (avatar.animations) avatar.animations.update(delta); // layer 1+2: mixer
     if (avatar.motion) avatar.motion.update(delta);         // layer 3: procedural additive
@@ -414,6 +442,7 @@ function refreshState() {
   ui.setState(state);
   avatar.motion?.setState(state);     // attentive lean-in / think pose / etc.
   avatar.animations?.setState(state); // state base loops (talk/listen/think) if provided
+  if (avatar.expressions) avatar.expressions.speaking = state === "speaking";
 }
 
 ws.onConnection((ok) => {

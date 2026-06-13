@@ -102,13 +102,18 @@ const BLINK_MAX = 6;
 const BLINK_CLOSE = 0.06;       // s — lids drop fast...
 const BLINK_OPEN = 0.18;        // s — ...and reopen slower (eased: organic, not metronome)
 const DOUBLE_BLINK_CHANCE = 0.2;
-const SQUINT = 0.25;            // lid weight held while happy/excited (smiling eyes)
+// This model's happy/excited MORPH already narrows the eyes (smiling eyes), so
+// an extra blink-channel squint here just stacks and over-closes them during
+// speech (the "stuck eyes" bug). Kept at 0; raise only for models whose
+// emotion morphs leave the eyes wide.
+const SQUINT = 0;
 const LID_FOLLOW = 1.2;         // lids lower a touch when the gaze drops (subtle pro touch)
 const LID_FOLLOW_MAX = 0.18;
 
 // -- gaze ---------------------------------------------------------------------------
 const GAZE_LAG = 5;             // 1/s — eyes chase the camera
 const SACCADE_SNAP = 22;        // 1/s — saccades are near-instant
+const HEAD_FOLLOW_TAU = 0.22;   // s — ease the head/body toward the camera angle
 // idle eye wander: deliberate held side-glances while idle (vs. saccade jitter)
 const WANDER_INTERVAL_MIN = 3;  // s of eye contact between glances
 const WANDER_INTERVAL_MAX = 7;
@@ -217,6 +222,10 @@ export class MotionController {
     this._blinkT = null;
     this._blinkAgain = false;
     this.suppressBlink = false; // expressions.js sets this during [surprised]
+
+    // head-follow: main.js sets the target yaw (rad) toward the orbit camera.
+    this.headFollowTarget = 0;
+    this._headFollow = 0;
   }
 
   // -- public API -------------------------------------------------------------
@@ -314,6 +323,7 @@ export class MotionController {
     this._breathe();
     this._weightShift(delta);
     this._idleTilt(delta);
+    this._headTurn(delta);
     this._sway();
     this._handBeats(delta);
     this._emphasis(delta);
@@ -361,6 +371,23 @@ export class MotionController {
     this._shiftCur += (this._shiftSide - this._shiftCur) * (1 - Math.exp(-delta / SHIFT_TAU));
     this._addRot("spine", "z", this._shiftCur * SHIFT_SPINE_Z);
     this._addRot("hips", "z", this._shiftCur * SHIFT_HIPS_Z);
+  }
+
+  /**
+   * Turn the head (and a little neck/spine) toward the orbit camera so she
+   * appears to track the viewer. The target yaw is computed in main.js from
+   * the camera angle (it knows OrbitControls); here we just ease and split it
+   * down the chain so the turn looks like a body movement, not a snap.
+   */
+  _headTurn(delta) {
+    this._headFollow +=
+      (this.headFollowTarget - this._headFollow) * (1 - Math.exp(-delta / HEAD_FOLLOW_TAU));
+    const y = this._headFollow;
+    if (Math.abs(y) < 1e-4) return;
+    this._addRot("spine", "y", y * 0.1);
+    this._addRot("chest", "y", y * 0.1);
+    this._addRot("neck", "y", y * 0.35);
+    this._addRot("head", "y", y * 0.45);
   }
 
   _idleTilt(delta) {
