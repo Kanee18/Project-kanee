@@ -493,10 +493,10 @@ const player = new SegmentPlayer({
     // While presenting a math answer, keep the hand on the hologram (don't
     // let per-sentence gestures pull it away).
     if (mathActive) return;
-    // replace:true keeps gestures in sync with the sentence being SPOKEN —
-    // a leftover gesture from the previous sentence fades out instead of
-    // delaying this one out of context.
-    if (seg.gesture) avatar.animations?.playGesture(seg.gesture, { replace: true });
+    // replace:true keeps gestures in sync with the sentence being SPOKEN;
+    // cooldown:true paces them so a run of short sentences plays one clean
+    // gesture and lets it breathe instead of churning bounce→wave→lean_in.
+    if (seg.gesture) avatar.animations?.playGesture(seg.gesture, { replace: true, cooldown: true });
   },
   onSegmentAudio: (seg, duration) => {
     // The segment's text drives the mouth-shape track for its audio.

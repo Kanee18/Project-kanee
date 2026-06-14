@@ -37,6 +37,11 @@ const GESTURE_CANCEL_FADE = 0.3; // s — replace/interrupt fade
 const GESTURE_MAX_BLEND = 0.8;   // peak share of the pose the gesture takes
 const TALK_GESTURE_MIN = 5;      // s between auto conversational gestures
 const TALK_GESTURE_MAX = 9;
+// Refractory window for per-sentence gestures: after one fires, the next
+// conversational gesture is skipped until this much time has passed, so a
+// reply of short sentences doesn't churn through clips back-to-back (the
+// hand-authored clips don't blend gracefully when stacked that fast).
+const GESTURE_MIN_INTERVAL = 2.5; // s
 
 /** Auto talk-gesture pools per emotion (filtered to loaded clips at runtime).
  *  Emotions absent here get none — a cheery clip during [sad] reads wrong. */
@@ -62,6 +67,7 @@ export class AnimationController {
     this._activeGesture = null;   // the active AnimationAction
     this._activeMaxBlend = GESTURE_MAX_BLEND;
     this._pendingGesture = null;  // pending { action, maxBlend } entry
+    this._gestureStartedAt = -Infinity; // s (performance clock) of the last gesture start
     // Root motion: a keepRoot gesture's hips POSITION track is extracted (not
     // driven onto the bone — that snaps) and replayed as a smooth world-space
     // translation of the whole avatar, then eased back home on release.
@@ -190,13 +196,20 @@ export class AnimationController {
    * Trigger a gesture by tag name. Default: queue at most one, drop extras.
    * With {replace:true} the current gesture fades out and this one starts
    * now — used per-sentence so gestures stay in sync with the spoken text.
+   * With {cooldown:true} the call is skipped if another gesture started within
+   * GESTURE_MIN_INTERVAL — paces per-sentence gestures so short consecutive
+   * sentences don't churn through clips. Deliberate one-offs (welcome wave,
+   * emote, math) omit cooldown so they always play.
    * Returns the clip's duration in seconds (0 if missing/skipped).
    */
-  playGesture(name, { replace = false } = {}) {
+  playGesture(name, { replace = false, cooldown = false } = {}) {
     if (!name) return 0;
     const entry = this._gestures.get(name);
     if (!entry) return 0; // missing — already logged at load time
     const duration = entry.action.getClip().duration;
+    if (cooldown && performance.now() / 1000 - this._gestureStartedAt < GESTURE_MIN_INTERVAL) {
+      return duration; // too soon after the last gesture — keep things calm
+    }
     if (this._activeGesture) {
       if (this._activeGesture === entry.action) return duration;
       if (replace) {
@@ -244,6 +257,7 @@ export class AnimationController {
   cancelGestures() {
     this._pendingGesture = null;
     this._rootTrack = null; // _updateRoot eases any travelled offset back home
+    this._gestureStartedAt = -Infinity; // next reply's opening gesture isn't throttled
     if (this._activeGesture) {
       this._fadeOutAction(this._activeGesture, GESTURE_CANCEL_FADE);
       this._activeGesture = null;
@@ -258,6 +272,7 @@ export class AnimationController {
   _startGesture(entry) {
     this._activeGesture = entry.action;
     this._activeMaxBlend = entry.maxBlend;
+    this._gestureStartedAt = performance.now() / 1000; // paces the next conversational gesture
     // Arm root motion for this clip (or disarm if it has none); the ease-home
     // in _updateRoot keeps any leftover offset gliding back regardless.
     this._rootTrack = entry.rootTrack || null;
