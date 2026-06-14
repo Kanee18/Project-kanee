@@ -260,6 +260,10 @@ async function initAvatar(ui) {
       thankful: "/animations/thankful.vrma",
       thoughtful_nod: "/animations/thoughtful_nod.vrma",
       spin: "/animations/spin.vrma",
+      // full-body, precise: play at near-full weight so the body lean reads
+      // fully and the hand reaches the head. No keepRoot — the forward feel is
+      // already in the body motion; root translation only causes a pop.
+      tidy_up_hair: { url: "/animations/tidy_up_hair.vrma", blend: 0.97 },
       // emote clip for the emote button (assets/emotes/, space URL-encoded)
       kawaii: "/emotes/Kawaii%20Kaiwai.vrma",
       // math-answer presenting gesture (paired with the hologram)
@@ -267,7 +271,7 @@ async function initAvatar(ui) {
     });
     // Hidden idle animations: occasionally play one of these when she has
     // been still for a while, so she never reads as frozen.
-    animations.setFidgetPool(["peace", "think", "thankful", "thoughtful_nod", "spin"]);
+    animations.setFidgetPool(["peace", "think", "thankful", "thoughtful_nod", "spin", "tidy_up_hair"]);
     // Optional state base loops — supply these files and they're used
     // automatically (graceful fallback to idle while absent).
     await animations.loadStateLoops({

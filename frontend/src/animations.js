@@ -58,9 +58,10 @@ export class AnimationController {
     this._nextSwitch = randRange(IDLE_ROTATE_MIN, IDLE_ROTATE_MAX);
     this._stateLoops = {};        // state -> looping AnimationAction
     this._baseKind = "idle";      // which base layer is active
-    this._gestures = new Map();   // name -> AnimationAction
-    this._activeGesture = null;
-    this._pendingGesture = null;
+    this._gestures = new Map();   // name -> { action, maxBlend }
+    this._activeGesture = null;   // the active AnimationAction
+    this._activeMaxBlend = GESTURE_MAX_BLEND;
+    this._pendingGesture = null;  // pending { action, maxBlend } entry
     this._fidgetPool = [];
     this._talking = false;
     this._talkTimer = 0;
@@ -132,21 +133,34 @@ export class AnimationController {
 
   // -- gestures ----------------------------------------------------------------
 
-  /** @param urlByName e.g. { wave: "/animations/wave.vrma", ... } */
-  async loadGestures(urlByName) {
-    for (const [name, url] of Object.entries(urlByName)) {
+  /**
+   * @param specByName each value is either a URL string, or
+   *   { url, keepRoot, blend } where:
+   *   - keepRoot: keep the hips POSITION (root motion) track, e.g. a clip that
+   *     steps toward a mirror; default false (she stays planted).
+   *   - blend: peak share of the pose this gesture takes (default 0.8). Use
+   *     near 1.0 for precise full-body clips where contact matters (hand to
+   *     head) so the idle underneath doesn't dilute the pose.
+   */
+  async loadGestures(specByName) {
+    for (const [name, spec] of Object.entries(specByName)) {
+      const url = typeof spec === "string" ? spec : spec.url;
+      const keepRoot = typeof spec === "object" && !!spec.keepRoot;
+      const maxBlend = (typeof spec === "object" && spec.blend) || GESTURE_MAX_BLEND;
       const clip = await this._loadClip(url);
       if (!clip) {
         console.warn(`animations: gesture '${name}' has no clip — it will be skipped`);
         continue;
       }
-      // Rotations only: no hips translation (teleport/slide), no expression
-      // tracks (the face belongs to the expression/viseme layers).
-      clip.tracks = clip.tracks.filter((t) => t.name.endsWith(".quaternion"));
+      // Keep rotations; drop facial/lookAt tracks. Hips POSITION (root motion)
+      // is dropped by default (keeps her planted) but kept for keepRoot clips.
+      clip.tracks = clip.tracks.filter(
+        (t) => t.name.endsWith(".quaternion") || (keepRoot && t.name.endsWith(".position")),
+      );
       const action = this.mixer.clipAction(clip);
       action.setLoop(THREE.LoopOnce, 1);
       action.clampWhenFinished = true;
-      this._gestures.set(name, action);
+      this._gestures.set(name, { action, maxBlend });
     }
     console.info(`animations: ${this._gestures.size} gesture clip(s) loaded`);
   }
@@ -159,21 +173,21 @@ export class AnimationController {
    */
   playGesture(name, { replace = false } = {}) {
     if (!name) return 0;
-    const action = this._gestures.get(name);
-    if (!action) return 0; // missing — already logged at load time
-    const duration = action.getClip().duration;
+    const entry = this._gestures.get(name);
+    if (!entry) return 0; // missing — already logged at load time
+    const duration = entry.action.getClip().duration;
     if (this._activeGesture) {
-      if (this._activeGesture === action) return duration;
+      if (this._activeGesture === entry.action) return duration;
       if (replace) {
         this._fadeOutAction(this._activeGesture, GESTURE_CANCEL_FADE);
         this._pendingGesture = null;
-        this._startGesture(action);
+        this._startGesture(entry);
       } else if (!this._pendingGesture) {
-        this._pendingGesture = action;
+        this._pendingGesture = entry;
       }
       return duration;
     }
-    this._startGesture(action);
+    this._startGesture(entry);
     return duration;
   }
 
@@ -215,11 +229,12 @@ export class AnimationController {
     setTimeout(() => action.stop(), duration * 1000 + 50);
   }
 
-  _startGesture(action) {
-    this._activeGesture = action;
-    action.reset();
-    action.setEffectiveWeight(0);
-    action.play();
+  _startGesture(entry) {
+    this._activeGesture = entry.action;
+    this._activeMaxBlend = entry.maxBlend;
+    entry.action.reset();
+    entry.action.setEffectiveWeight(0);
+    entry.action.play();
     this.onGestureStart?.(); // anticipation dip overlaps the fade-in
   }
 
@@ -252,7 +267,7 @@ export class AnimationController {
         // Smooth the on-screen blend fraction, then invert w/(w+1) for the
         // mixer weight, so what the eye sees follows smooth01 exactly.
         const ramp = Math.min(t / GESTURE_FADE_IN, tail / GESTURE_FADE_OUT, 1);
-        const frac = GESTURE_MAX_BLEND * smooth01(Math.max(0, ramp));
+        const frac = this._activeMaxBlend * smooth01(Math.max(0, ramp));
         action.setEffectiveWeight(frac / (1 - frac));
       }
     }
