@@ -29,10 +29,11 @@ import { DebugOverlay } from "./debug.js"; // temporary — Step 2 diagnosis
 // if their file exists under assets/outfits/. Add entries here for more.
 const OUTFITS = [
   { name: "Default", url: "/character.vrm" },
-  { name: "Casual", url: "/outfits/casual.vrm" },
+  { name: "Casual", url: "/Kanee_casual_outfit.vrm" },
+  // Add more here; files live under assets/ (served at the web root). Entries
+  // whose file is missing are probed out and hidden from the sidebar.
   { name: "Uniform", url: "/outfits/uniform.vrm" },
   { name: "Dress", url: "/outfits/dress.vrm" },
-  { name: "Swimsuit", url: "/outfits/swimsuit.vrm" },
 ];
 
 // Emotes = one-shot expression clips under assets/emotes/. Registered as
@@ -312,10 +313,35 @@ async function initAvatar(ui) {
   }
 
   /**
-   * Load a VRM and swap it in as the active avatar. firstLoad frames the camera
-   * (outfits of the same character share proportions, so swaps keep the view).
-   * The new model + its controllers are built BEFORE the swap, so the render
-   * loop keeps driving the current model until the new one is fully ready.
+   * Make `vrm` (with its freshly built controllers) the active avatar. Atomic
+   * and synchronous — the render loop never sees a half-built state — and the
+   * previous model's GPU resources are freed.
+   */
+  function swapIn(vrm, built) {
+    const old = avatar.vrm;
+    if (!vrm.scene.parent) scene.add(vrm.scene);
+    vrm.scene.visible = true;
+    avatar.vrm = vrm;
+    avatar.animations = built.animations;
+    avatar.motion = built.motion;
+    avatar.expressions = built.expressions;
+    avatar.lipsync = built.lipsync;
+    avatar.expressions.speaking = backendState === "speaking";
+    if (player.analyser) avatar.lipsync.setAnalyser(player.analyser);
+    debug.attach(vrm, () => avatar.lipsync?.level ?? 0);
+    if (old && old !== vrm) {
+      scene.remove(old.scene);
+      VRMUtils.deepDispose(old.scene); // free the previous outfit's GPU resources
+    }
+    refreshState(); // resync the fresh controllers to the current chat state
+  }
+
+  /**
+   * Load a VRM and bring it in. firstLoad frames the camera and plays the spawn
+   * intro; outfit swaps instead keep the camera and present an RPG-style
+   * transformation flash (no full intro, so it doesn't feel like a reload).
+   * The new model + controllers are built BEFORE the swap, so the render loop
+   * keeps driving the current model until the new one is fully ready.
    */
   async function loadOutfit(url, firstLoad) {
     const gltf = await loader.loadAsync(url);
@@ -344,29 +370,17 @@ async function initAvatar(ui) {
       director.frameFromModel(vrm.scene);
       director.setHome(); // the bust-up framing is the default view to snap back to
       frontAzimuth = controls.getAzimuthalAngle();
+      swapIn(vrm, built);
+      // First spawn only: glitch-materialize, then wave hello with a smile.
+      intro.onWelcome = playWelcome;
+      intro.begin(vrm.scene);
+      console.info("avatar ready");
+      return;
     }
 
-    // Atomic swap — synchronous, so the render loop can't see a half-built state.
-    const old = avatar.vrm;
-    scene.add(vrm.scene);
-    avatar.vrm = vrm;
-    avatar.animations = built.animations;
-    avatar.motion = built.motion;
-    avatar.expressions = built.expressions;
-    avatar.lipsync = built.lipsync;
-    avatar.expressions.speaking = backendState === "speaking";
-    if (player.analyser) avatar.lipsync.setAnalyser(player.analyser);
-    debug.attach(vrm, () => avatar.lipsync?.level ?? 0);
-    if (old) {
-      scene.remove(old.scene);
-      VRMUtils.deepDispose(old.scene); // free the previous outfit's GPU resources
-    }
-
-    // Glitch-materialize the (new) outfit, then wave hello with a smile.
-    intro.onWelcome = playWelcome;
-    intro.begin(vrm.scene);
-    refreshState(); // resync the fresh controllers to the current chat state
-    console.info(firstLoad ? "avatar ready" : `outfit changed: ${url}`);
+    // Outfit change: swap straight in — no intro, no transition effect.
+    swapIn(vrm, built);
+    console.info(`outfit changed: ${url}`);
   }
 
   setOutfit = (url) => loadOutfit(url, false);
