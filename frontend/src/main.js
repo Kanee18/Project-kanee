@@ -152,11 +152,18 @@ class SegmentPlayer {
     this._onChange();
     this._onSegmentStart(seg);
 
-    if (seg.audio) {
+    if (seg.audio || seg.audioUrl) {
       try {
         const ctx = this._ensureCtx();
-        const bytes = Uint8Array.from(atob(seg.audio), (c) => c.charCodeAt(0));
-        const buffer = await ctx.decodeAudioData(bytes.buffer);
+        let arrayBuf;
+        if (seg.audio) {
+          arrayBuf = Uint8Array.from(atob(seg.audio), (c) => c.charCodeAt(0)).buffer;
+        } else {
+          const resp = await fetch(seg.audioUrl); // local greeting file
+          if (!resp.ok) throw new Error(`audio ${seg.audioUrl} → ${resp.status}`);
+          arrayBuf = await resp.arrayBuffer();
+        }
+        const buffer = await ctx.decodeAudioData(arrayBuf);
         if (gen !== this._gen) return; // flushed while decoding
         const source = ctx.createBufferSource();
         source.buffer = buffer;
@@ -454,6 +461,107 @@ async function initAvatar(ui) {
       Math.sign(theta) * ((magDeg * Math.PI) / 180) * HEAD_FOLLOW_SIGN;
   }
 
+  // -- click / tap to pat the character ---------------------------------------
+  // Screen-space picking (NOT mesh raycasting): projecting a handful of bones
+  // each move is cheap, whereas raycasting the skinned mesh recomputes every
+  // skinned vertex on the CPU and lags hard on hover.
+  const proj = new THREE.Vector3();
+  const WORLD_UP = new THREE.Vector3(0, 1, 0);
+  // Hover-box span: head TOP (the head bone sits down at face level, so raise
+  // it to the crown) + extremities, so the box covers her hair down to her feet.
+  const SPAN = [
+    ["head", 0.18], ["hips", 0],
+    ["leftHand", 0], ["rightHand", 0],
+    ["leftFoot", 0], ["rightFoot", 0],
+  ];
+  // Tap regions [name, bone, raise]. The head bone is at face height, so the
+  // pat ("head") is anchored ABOVE it (the crown) and the face is its own
+  // region just below — patting the top vs poking the face now differ.
+  const REGIONS = [
+    ["head", "head", 0.16],
+    ["face", "head", 0.02],
+    ["chest", "chest", 0],
+    ["hand", "leftHand", 0],
+    ["hand", "rightHand", 0],
+    ["lower", "hips", 0],
+  ];
+  let downX = 0;
+  let downY = 0;
+  let downT = 0;
+  let lastHover = 0;
+
+  /** Project a humanoid bone (optionally raised `up` metres) to screen pixels. */
+  function projectBone(boneName, up, domRect) {
+    const node = avatar.vrm?.humanoid?.getRawBoneNode(boneName);
+    if (!node) return null;
+    node.getWorldPosition(proj);
+    if (up) proj.addScaledVector(WORLD_UP, up);
+    proj.project(camera);
+    if (proj.z > 1) return null; // behind the camera
+    return {
+      x: domRect.left + (proj.x * 0.5 + 0.5) * domRect.width,
+      y: domRect.top + (-proj.y * 0.5 + 0.5) * domRect.height,
+    };
+  }
+
+  /** The tapped body region, or null if the pointer isn't on the character. */
+  function regionAt(clientX, clientY) {
+    if (!avatar.vrm) return null;
+    const domRect = renderer.domElement.getBoundingClientRect();
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    let any = false;
+    for (const [bone, up] of SPAN) {
+      const p = projectBone(bone, up, domRect);
+      if (!p) continue;
+      any = true;
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    if (!any) return null;
+    const padX = 45;
+    const padY = 30;
+    if (clientX < minX - padX || clientX > maxX + padX) return null;
+    if (clientY < minY - padY || clientY > maxY + padY) return null;
+    let best = "chest";
+    let bestD = Infinity;
+    for (const [region, bone, up] of REGIONS) {
+      const p = projectBone(bone, up, domRect);
+      if (!p) continue;
+      const d = Math.hypot(p.x - clientX, p.y - clientY);
+      if (d < bestD) {
+        bestD = d;
+        best = region;
+      }
+    }
+    return best;
+  }
+
+  renderer.domElement.addEventListener("pointerdown", (e) => {
+    downX = e.clientX;
+    downY = e.clientY;
+    downT = performance.now();
+  });
+  renderer.domElement.addEventListener("pointerup", (e) => {
+    // A tap, not an orbit-drag: little movement and quick.
+    if (Math.hypot(e.clientX - downX, e.clientY - downY) > 6) return;
+    if (performance.now() - downT > 400) return;
+    const region = regionAt(e.clientX, e.clientY);
+    if (region) triggerReaction(region);
+  });
+  // Hover cue so it's discoverable that she's pokeable (throttled).
+  renderer.domElement.addEventListener("pointermove", (e) => {
+    if (e.buttons !== 0) return; // not while dragging the camera
+    const now = performance.now();
+    if (now - lastHover < 60) return;
+    lastHover = now;
+    renderer.domElement.style.cursor = regionAt(e.clientX, e.clientY) ? "pointer" : "";
+  });
+
   const clock = new THREE.Clock();
   renderer.setAnimationLoop(() => {
     const delta = clock.getDelta();
@@ -670,6 +778,77 @@ function sendOrToast(msg) {
 }
 
 // ---------------------------------------------------------------------------
+// greetings — time-aware + initiative-aware. She greets you when you arrive
+// (on the first interaction, since browsers block audio until then) and again
+// when you come back to the tab after being away a while.
+//
+// VOICE FILES (you record these): assets/greetings/<slot>.wav — served at
+// /greetings/<slot>.wav. Slots: morning, afternoon, evening, night,
+// welcome_back. Edit the text/emotion/gesture below to match what you record.
+// If a file is missing, the line still shows + she gestures (just no voice).
+// ---------------------------------------------------------------------------
+
+const GREETINGS = {
+  morning: { text: "Good morning! Did you sleep okay?", emotion: "happy", gesture: "wave" },
+  afternoon: { text: "Good afternoon! How's your day going?", emotion: "happy", gesture: "wave" },
+  evening: { text: "Good evening! Welcome back.", emotion: "happy", gesture: "wave" },
+  night: { text: "It's getting late... don't stay up too long, okay?", emotion: "curious", gesture: "tilt" },
+  welcome_back: { text: "Oh, you're back! I missed you.", emotion: "excited", gesture: "bounce" },
+};
+
+/** Local time → greeting slot. */
+function timeSlot() {
+  const h = new Date().getHours();
+  if (h >= 5 && h < 11) return "morning";
+  if (h >= 11 && h < 17) return "afternoon";
+  if (h >= 17 && h < 22) return "evening";
+  return "night";
+}
+
+/** Speak a greeting through the normal segment pipeline (voice + lip sync +
+ *  expression + gesture + caption). Skipped if she's busy. */
+function playGreeting(slot) {
+  const g = GREETINGS[slot];
+  if (!g) return;
+  if (player.playing || micHeld || backendState !== "idle") return;
+  const seg = {
+    text: g.text,
+    emotion: g.emotion,
+    gesture: g.gesture,
+    audioUrl: `/greetings/${slot}.wav`,
+  };
+  ui.newReply();
+  ui.addSegment(seg);
+  player.enqueue(seg);
+}
+
+// Arrival greeting: deferred to the first user interaction because browser
+// autoplay policy keeps the AudioContext suspended until then.
+let greeted = false;
+function fireArrivalGreeting() {
+  if (greeted) return;
+  greeted = true;
+  window.removeEventListener("pointerdown", fireArrivalGreeting);
+  window.removeEventListener("keydown", fireArrivalGreeting);
+  setTimeout(() => playGreeting(timeSlot()), 300); // let the spawn wave settle first
+}
+window.addEventListener("pointerdown", fireArrivalGreeting);
+window.addEventListener("keydown", fireArrivalGreeting);
+
+// Welcome-back: greet again when the tab regains focus after being away a while.
+const AWAY_MS = 5 * 60 * 1000;
+let hiddenAt = null;
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    hiddenAt = Date.now();
+  } else {
+    const away = hiddenAt ? Date.now() - hiddenAt : 0;
+    hiddenAt = null;
+    if (greeted && away > AWAY_MS) playGreeting("welcome_back");
+  }
+});
+
+// ---------------------------------------------------------------------------
 // emotes — chosen from the sidebar; play the clip + a brief happy expression
 // and pull the camera out to a full-body shot for its duration
 // ---------------------------------------------------------------------------
@@ -717,6 +896,58 @@ function triggerEmote(key) {
       avatar.motion?.setEmotion("neutral");
     }
   }, (dur + 0.6) * 1000);
+}
+
+// ---------------------------------------------------------------------------
+// poke / pat — click the character's body for a cute reaction (visual only,
+// no backend round-trip). Only while idle, so it never fights a spoken reply.
+// ---------------------------------------------------------------------------
+
+let reactionCalmTimer = null;
+
+/** React to a tap on a body region: expression + gesture + a little motion. */
+function triggerReaction(region) {
+  if (!avatar.expressions || player.playing || micHeld || emoteActive) return;
+  const m = avatar.motion;
+  let emotion = "surprised";
+  let gesture = null;
+  switch (region) {
+    case "head": // pat the crown → happy giggle, duck the head a little
+      emotion = "happy";
+      m?.impulseRot("head", "x", 0.16, 0.12, 0.6);
+      m?.impulseRot("neck", "x", 0.07, 0.12, 0.6);
+      break;
+    case "face": // poke the face → bashful, turns away with a blush
+      emotion = "shy";
+      m?.impulseRot("head", "y", 0.18, 0.12, 0.7);
+      m?.impulseRot("head", "x", -0.04, 0.12, 0.6);
+      break;
+    case "chest": // poke the torso → startled little bounce
+      emotion = "surprised";
+      gesture = "bounce";
+      m?.impulseRot("spine", "x", -0.12, 0.07, 0.5);
+      break;
+    case "hand": // tap a hand → playful
+      emotion = "happy";
+      gesture = "peace";
+      break;
+    case "lower": // poke low → pout and turn away
+      emotion = "pout";
+      m?.impulseRot("head", "y", 0.22, 0.12, 0.7);
+      break;
+  }
+  avatar.expressions.setEmotion(emotion);
+  m?.setEmotion(emotion);
+  if (gesture) avatar.animations?.playGesture(gesture, { replace: true });
+  lastActivityAt = Date.now(); // counts as activity so an idle fidget doesn't fire
+  clearTimeout(reactionCalmTimer);
+  reactionCalmTimer = setTimeout(() => {
+    reactionCalmTimer = null;
+    if (!player.playing) {
+      avatar.expressions.reset();
+      m?.setEmotion("neutral");
+    }
+  }, 2000);
 }
 
 // ---------------------------------------------------------------------------
