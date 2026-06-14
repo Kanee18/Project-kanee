@@ -58,10 +58,20 @@ export class AnimationController {
     this._nextSwitch = randRange(IDLE_ROTATE_MIN, IDLE_ROTATE_MAX);
     this._stateLoops = {};        // state -> looping AnimationAction
     this._baseKind = "idle";      // which base layer is active
-    this._gestures = new Map();   // name -> { action, maxBlend }
+    this._gestures = new Map();   // name -> { action, maxBlend, rootTrack, rootScale }
     this._activeGesture = null;   // the active AnimationAction
     this._activeMaxBlend = GESTURE_MAX_BLEND;
     this._pendingGesture = null;  // pending { action, maxBlend } entry
+    // Root motion: a keepRoot gesture's hips POSITION track is extracted (not
+    // driven onto the bone — that snaps) and replayed as a smooth world-space
+    // translation of the whole avatar, then eased back home on release.
+    this._rootBase = vrm.scene.position.clone();
+    this._rootOffset = new THREE.Vector3();
+    this._rootTrack = null;       // { times, values } of the active root gesture
+    this._rootScale = 1;
+    this._rootFirst = new THREE.Vector3();  // hips pos at clip start (the zero point)
+    this._rootTmp = new THREE.Vector3();
+    this._rootQuat = new THREE.Quaternion();
     this._fidgetPool = [];
     this._talking = false;
     this._talkTimer = 0;
@@ -136,8 +146,10 @@ export class AnimationController {
   /**
    * @param specByName each value is either a URL string, or
    *   { url, keepRoot, blend } where:
-   *   - keepRoot: keep the hips POSITION (root motion) track, e.g. a clip that
-   *     steps toward a mirror; default false (she stays planted).
+   *   - keepRoot: replay the hips POSITION (root motion) track as a smooth
+   *     world-space translation of the whole avatar, e.g. a clip that steps
+   *     toward a mirror; default false (she stays planted). Pass a number to
+   *     scale/flip it (negative reverses the direction).
    *   - blend: peak share of the pose this gesture takes (default 0.8). Use
    *     near 1.0 for precise full-body clips where contact matters (hand to
    *     head) so the idle underneath doesn't dilute the pose.
@@ -145,22 +157,31 @@ export class AnimationController {
   async loadGestures(specByName) {
     for (const [name, spec] of Object.entries(specByName)) {
       const url = typeof spec === "string" ? spec : spec.url;
-      const keepRoot = typeof spec === "object" && !!spec.keepRoot;
+      const keepRootRaw = typeof spec === "object" ? spec.keepRoot : false;
+      const keepRoot = !!keepRootRaw;
+      const rootScale = typeof keepRootRaw === "number" ? keepRootRaw : 1;
       const maxBlend = (typeof spec === "object" && spec.blend) || GESTURE_MAX_BLEND;
       const clip = await this._loadClip(url);
       if (!clip) {
         console.warn(`animations: gesture '${name}' has no clip — it will be skipped`);
         continue;
       }
-      // Keep rotations; drop facial/lookAt tracks. Hips POSITION (root motion)
-      // is dropped by default (keeps her planted) but kept for keepRoot clips.
-      clip.tracks = clip.tracks.filter(
-        (t) => t.name.endsWith(".quaternion") || (keepRoot && t.name.endsWith(".position")),
-      );
+      // Keep rotations; drop facial/lookAt tracks. The hips POSITION (root
+      // motion) track is EXTRACTED for keepRoot clips (replayed as a smooth
+      // avatar translation below — driving it onto the bone snaps) and dropped
+      // from the clip either way, so the body stays planted relative to root.
+      let rootTrack = null;
+      clip.tracks = clip.tracks.filter((t) => {
+        if (t.name.endsWith(".position")) {
+          if (keepRoot && !rootTrack) rootTrack = { times: t.times, values: t.values };
+          return false; // never let the mixer drive translation onto a bone
+        }
+        return t.name.endsWith(".quaternion");
+      });
       const action = this.mixer.clipAction(clip);
       action.setLoop(THREE.LoopOnce, 1);
       action.clampWhenFinished = true;
-      this._gestures.set(name, { action, maxBlend });
+      this._gestures.set(name, { action, maxBlend, rootTrack, rootScale });
     }
     console.info(`animations: ${this._gestures.size} gesture clip(s) loaded`);
   }
@@ -208,16 +229,21 @@ export class AnimationController {
     this._talking = on;
   }
 
-  /** Hidden idle animation: play one random fidget if nothing else is going on. */
+  /**
+   * Hidden idle animation: play one random fidget if nothing else is going on.
+   * Returns the clip's duration in seconds (0 if none played) so the caller can
+   * time things to it, e.g. locking camera zoom while she's animating.
+   */
   playRandomFidget() {
-    if (this._fidgetPool.length === 0 || this._activeGesture) return;
+    if (this._fidgetPool.length === 0 || this._activeGesture) return 0;
     const name = this._fidgetPool[Math.floor(Math.random() * this._fidgetPool.length)];
-    this.playGesture(name);
+    return this.playGesture(name);
   }
 
   /** Interrupt: fade any gesture out and forget the pending one. */
   cancelGestures() {
     this._pendingGesture = null;
+    this._rootTrack = null; // _updateRoot eases any travelled offset back home
     if (this._activeGesture) {
       this._fadeOutAction(this._activeGesture, GESTURE_CANCEL_FADE);
       this._activeGesture = null;
@@ -232,6 +258,11 @@ export class AnimationController {
   _startGesture(entry) {
     this._activeGesture = entry.action;
     this._activeMaxBlend = entry.maxBlend;
+    // Arm root motion for this clip (or disarm if it has none); the ease-home
+    // in _updateRoot keeps any leftover offset gliding back regardless.
+    this._rootTrack = entry.rootTrack || null;
+    this._rootScale = entry.rootScale ?? 1;
+    if (this._rootTrack) this._sampleRoot(0, this._rootFirst);
     entry.action.reset();
     entry.action.setEffectiveWeight(0);
     entry.action.play();
@@ -243,6 +274,7 @@ export class AnimationController {
   /** Advance the mixer, gesture envelope, talk gestures, idle rotation. */
   update(delta) {
     this.mixer.update(delta);
+    this._updateRoot(delta); // keepRoot translation (or ease back home)
 
     if (this._activeGesture) {
       const action = this._activeGesture;
@@ -252,6 +284,7 @@ export class AnimationController {
       if (t >= duration - 1e-3) {
         action.stop();
         this._activeGesture = null;
+        this._rootTrack = null; // release: _updateRoot eases the offset home
         this.onGestureEnd?.(); // release overshoot in the procedural layer
         const pending = this._pendingGesture;
         this._pendingGesture = null;
@@ -293,6 +326,54 @@ export class AnimationController {
         this._rotateIdle();
       }
     }
+  }
+
+  /**
+   * Root motion: while a keepRoot gesture plays, translate the whole avatar by
+   * the hips' displacement since the clip started (grounded — vertical dropped),
+   * mapped from model space into world space. On release the offset glides back
+   * to her home spot. Because the displacement starts at zero and grows
+   * smoothly, there's no pop — unlike driving the hips bone directly.
+   */
+  _updateRoot(delta) {
+    if (this._rootTrack && this._activeGesture) {
+      this._sampleRoot(this._activeGesture.time, this._rootTmp);
+      this._rootTmp.sub(this._rootFirst); // displacement since clip start (model space)
+      this._rootTmp.y = 0;                // keep her feet on the floor
+      this._rootTmp.multiplyScalar(this._rootScale);
+      this.vrm.scene.getWorldQuaternion(this._rootQuat);
+      this._rootTmp.applyQuaternion(this._rootQuat); // model space → world
+      this._rootOffset.copy(this._rootTmp);
+    } else if (this._rootOffset.lengthSq() > 1e-9) {
+      this._rootOffset.multiplyScalar(Math.max(0, 1 - delta * 4)); // ~0.25 s glide home
+      if (this._rootOffset.lengthSq() < 1e-9) this._rootOffset.set(0, 0, 0);
+    } else {
+      return; // home and idle — leave vrm.scene.position untouched
+    }
+    this.vrm.scene.position.copy(this._rootBase).add(this._rootOffset);
+  }
+
+  /** Linear-sample the active root position track (Vector3) at `time`. */
+  _sampleRoot(time, out) {
+    const { times, values } = this._rootTrack;
+    const n = times.length;
+    if (n === 0) return out.set(0, 0, 0);
+    if (time <= times[0]) return out.set(values[0], values[1], values[2]);
+    if (time >= times[n - 1]) {
+      const i = (n - 1) * 3;
+      return out.set(values[i], values[i + 1], values[i + 2]);
+    }
+    let hi = 1;
+    while (hi < n && times[hi] < time) hi++;
+    const lo = hi - 1;
+    const f = (time - times[lo]) / (times[hi] - times[lo]);
+    const a = lo * 3;
+    const b = hi * 3;
+    return out.set(
+      values[a] + (values[b] - values[a]) * f,
+      values[a + 1] + (values[b + 1] - values[a + 1]) * f,
+      values[a + 2] + (values[b + 2] - values[a + 2]) * f,
+    );
   }
 
   _rotateIdle() {

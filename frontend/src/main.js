@@ -34,6 +34,7 @@ const avatar = {
   lipsync: null,
   cameraDirector: null,
   hologram: null,
+  controls: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -183,6 +184,7 @@ async function initAvatar(ui) {
   controls.maxDistance = 4;
   controls.maxPolarAngle = Math.PI * 0.6;
   controls.enablePan = false;
+  avatar.controls = controls; // exposed so zoom can be locked during hidden animations
 
   const intro = new GlitchIntro(renderer, scene, camera);
   let frontAzimuth = controls.getAzimuthalAngle(); // camera angle where she faces front
@@ -261,9 +263,10 @@ async function initAvatar(ui) {
       thoughtful_nod: "/animations/thoughtful_nod.vrma",
       spin: "/animations/spin.vrma",
       // full-body, precise: play at near-full weight so the body lean reads
-      // fully and the hand reaches the head. No keepRoot — the forward feel is
-      // already in the body motion; root translation only causes a pop.
-      tidy_up_hair: { url: "/animations/tidy_up_hair.vrma", blend: 0.97 },
+      // fully and the hand reaches the head. keepRoot replays the clip's baked
+      // forward step as a smooth avatar translation (delta-driven, no pop), so
+      // she walks up toward the mirror and glides back when she's done.
+      tidy_up_hair: { url: "/animations/tidy_up_hair.vrma", blend: 0.97, keepRoot: true },
       // emote clip for the emote button (assets/emotes/, space URL-encoded)
       kawaii: "/emotes/Kawaii%20Kaiwai.vrma",
       // math-answer presenting gesture (paired with the hologram)
@@ -630,17 +633,43 @@ function randFidgetDelay() {
   return 12_000 + Math.random() * 8_000;
 }
 
+// Lock mouse-wheel zoom while a hidden animation plays (some travel forward,
+// e.g. tidy_up_hair), so the view doesn't fight the motion. Re-enabled after
+// the clip plus a buffer for its fade-out + glide-home.
+let zoomLockTimer = null;
+function lockZoom(seconds) {
+  if (!avatar.controls) return;
+  avatar.controls.enableZoom = false;
+  clearTimeout(zoomLockTimer);
+  zoomLockTimer = setTimeout(() => {
+    zoomLockTimer = null;
+    if (avatar.controls) avatar.controls.enableZoom = true;
+  }, seconds * 1000);
+}
+
 setInterval(() => {
   // An active emote counts as activity: this both blocks a fidget from firing
   // mid-emote and resets the timer so none fires the instant the emote ends.
   const trulyIdle = backendState === "idle" && !player.playing && !micHeld && !emoteActive;
   if (!trulyIdle) {
     lastActivityAt = Date.now();
+    // Activity resumed (a reply, mic, etc.) — don't leave zoom locked if a
+    // fidget was cut short before its timer fired.
+    if (zoomLockTimer !== null) {
+      clearTimeout(zoomLockTimer);
+      zoomLockTimer = null;
+      if (avatar.controls) avatar.controls.enableZoom = true;
+    }
     return;
   }
   if (Date.now() - lastActivityAt >= nextFidgetMs) {
-    if (Math.random() < 0.5) avatar.animations?.playRandomFidget();
-    else avatar.motion?.proceduralFidget();
+    if (Math.random() < 0.5) {
+      // Clip fidget (the hidden animations) — lock zoom for its duration.
+      const dur = avatar.animations?.playRandomFidget() || 0;
+      if (dur > 0) lockZoom(dur + 0.6);
+    } else {
+      avatar.motion?.proceduralFidget(); // subtle, in-place — no zoom lock needed
+    }
     lastActivityAt = Date.now();
     nextFidgetMs = randFidgetDelay();
   }
