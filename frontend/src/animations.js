@@ -68,6 +68,7 @@ export class AnimationController {
     this._activeMaxBlend = GESTURE_MAX_BLEND;
     this._pendingGesture = null;  // pending { action, maxBlend } entry
     this._gestureStartedAt = -Infinity; // s (performance clock) of the last gesture start
+    this._baseSuppressed = false; // true while a solo gesture has faded the base layer out
     // Root motion: a keepRoot gesture's hips POSITION track is extracted (not
     // driven onto the bone — that snaps) and replayed as a smooth world-space
     // translation of the whole avatar, then eased back home on release.
@@ -159,6 +160,9 @@ export class AnimationController {
    *   - blend: peak share of the pose this gesture takes (default 0.8). Use
    *     near 1.0 for precise full-body clips where contact matters (hand to
    *     head) so the idle underneath doesn't dilute the pose.
+   *   - solo: play with the base idle faded fully out (restored on release).
+   *     Use for big rotations (e.g. a 360° spin): blending a half-turned pose
+   *     against the idle is antipodal and stutters around 180°; solo avoids it.
    */
   async loadGestures(specByName) {
     for (const [name, spec] of Object.entries(specByName)) {
@@ -166,6 +170,7 @@ export class AnimationController {
       const keepRootRaw = typeof spec === "object" ? spec.keepRoot : false;
       const keepRoot = !!keepRootRaw;
       const rootScale = typeof keepRootRaw === "number" ? keepRootRaw : 1;
+      const solo = typeof spec === "object" && !!spec.solo;
       const maxBlend = (typeof spec === "object" && spec.blend) || GESTURE_MAX_BLEND;
       const clip = await this._loadClip(url);
       if (!clip) {
@@ -187,7 +192,7 @@ export class AnimationController {
       const action = this.mixer.clipAction(clip);
       action.setLoop(THREE.LoopOnce, 1);
       action.clampWhenFinished = true;
-      this._gestures.set(name, { action, maxBlend, rootTrack, rootScale });
+      this._gestures.set(name, { action, maxBlend, rootTrack, rootScale, solo });
     }
     console.info(`animations: ${this._gestures.size} gesture clip(s) loaded`);
   }
@@ -263,6 +268,7 @@ export class AnimationController {
     this._pendingGesture = null;
     this._rootTrack = null; // _updateRoot eases any travelled offset back home
     this._gestureStartedAt = -Infinity; // next reply's opening gesture isn't throttled
+    if (this._baseSuppressed) this._restoreBase(GESTURE_CANCEL_FADE);
     if (this._activeGesture) {
       this._fadeOutAction(this._activeGesture, GESTURE_CANCEL_FADE);
       this._activeGesture = null;
@@ -274,10 +280,32 @@ export class AnimationController {
     setTimeout(() => action.stop(), duration * 1000 + 50);
   }
 
+  /** Fade the base idle layer back in (after a solo gesture released it). */
+  _restoreBase(duration) {
+    if (!this._baseSuppressed) return;
+    this._baseSuppressed = false;
+    const base = this._baseAction();
+    if (!base) return;
+    base.enabled = true;
+    base.stopFading(); // clear the lingering fade-to-0 interpolant from suppression
+    if (!base.isRunning()) base.play();
+    if (duration > 0.02) base.fadeIn(duration);
+    else base.setEffectiveWeight(1);
+  }
+
   _startGesture(entry) {
     this._activeGesture = entry.action;
     this._activeMaxBlend = entry.maxBlend;
     this._gestureStartedAt = performance.now() / 1000; // paces the next conversational gesture
+    // Solo gestures own the body alone — fade the idle out so a big rotation
+    // doesn't blend against it (antipodal stutter near 180°). Non-solo gestures
+    // restore the base if a previous solo gesture had suppressed it.
+    if (entry.solo && !this._baseSuppressed) {
+      this._baseAction()?.fadeOut(GESTURE_FADE_IN);
+      this._baseSuppressed = true;
+    } else if (!entry.solo && this._baseSuppressed) {
+      this._restoreBase(GESTURE_CANCEL_FADE);
+    }
     // Arm root motion for this clip (or disarm if it has none); the ease-home
     // in _updateRoot keeps any leftover offset gliding back regardless.
     this._rootTrack = entry.rootTrack || null;
@@ -309,6 +337,7 @@ export class AnimationController {
         const pending = this._pendingGesture;
         this._pendingGesture = null;
         if (pending) this._startGesture(pending);
+        else if (this._baseSuppressed) this._restoreBase(GESTURE_FADE_OUT);
       } else if (this._pendingGesture && tail <= GESTURE_FADE_OUT) {
         // Crossfade gesture→gesture through the fade-out window instead of
         // dipping back to the base pose between them.
@@ -317,6 +346,9 @@ export class AnimationController {
         this._pendingGesture = null;
         this._startGesture(pending);
       } else {
+        // For a solo gesture, crossfade the idle back in during the fade-out
+        // window so it eases home instead of dropping to no drive at the end.
+        if (this._baseSuppressed && tail <= GESTURE_FADE_OUT) this._restoreBase(tail);
         // Smooth the on-screen blend fraction, then invert w/(w+1) for the
         // mixer weight, so what the eye sees follows smooth01 exactly.
         const ramp = Math.min(t / GESTURE_FADE_IN, tail / GESTURE_FADE_OUT, 1);
@@ -324,6 +356,11 @@ export class AnimationController {
         action.setEffectiveWeight(frac / (1 - frac));
       }
     }
+
+    // Safety net: if a solo gesture left the scene by any path (finished,
+    // cancelled, replaced) without the base being restored, bring it back now
+    // so the body never gets stranded in the clip's last pose (e.g. arms out).
+    if (!this._activeGesture && this._baseSuppressed) this._restoreBase(GESTURE_FADE_OUT);
 
     // Emotion-gated auto conversational gestures while talking.
     if (this._talking && !this._activeGesture) {

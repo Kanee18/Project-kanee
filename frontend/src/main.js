@@ -268,7 +268,9 @@ async function initAvatar(ui) {
       // extra clips, used only as idle fidgets (never sent by the LLM)
       thankful: "/animations/thankful.vrma",
       thoughtful_nod: "/animations/thoughtful_nod.vrma",
-      spin: "/animations/spin.vrma",
+      // full 360° turn to show the outfit: solo so the half-turned pose never
+      // blends against the idle (that's antipodal and stutters around 180°).
+      show_full_body: { url: "/animations/Show_full_body.vrma", solo: true },
       // full-body, precise: near-full weight so the body lean reads and the
       // hand reaches the head; keepRoot replays the baked forward step as a
       // smooth avatar translation (no pop), then glides home when done.
@@ -291,7 +293,7 @@ async function initAvatar(ui) {
     animations.start();
     await animations.loadGestures(gestureSpec());
     // Hidden idle animations: occasionally play one when she's been still.
-    animations.setFidgetPool(["peace", "think", "thankful", "thoughtful_nod", "spin", "tidy_up_hair"]);
+    animations.setFidgetPool(["peace", "think", "thankful", "thoughtful_nod", "show_full_body", "tidy_up_hair"]);
     await animations.loadStateLoops({
       speaking: "/animations/explain.vrma", // the talking/explaining body animation
       listening: "/animations/listening_01.vrma",
