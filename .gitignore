@@ -1,6 +1,7 @@
 # secrets & local state
 backend/.env
 backend/chat_history.json
+backend/user_memory.json
 
 # python
 __pycache__/

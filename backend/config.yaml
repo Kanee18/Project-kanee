@@ -4,6 +4,8 @@ llm:
   max_tokens: 1024               # replies are a few short spoken sentences
   max_history_turns: 30
   history_file: chat_history.json
+  memory_file: user_memory.json  # long-term key-facts memory about the user
+  max_memory_facts: 50           # cap on remembered facts (most important kept)
 
 character:
   name: Kanee
