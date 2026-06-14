@@ -30,7 +30,7 @@ character:
     [neutral] [happy] [excited] [sad] [angry] [surprised] [shy] [pout] [curious] [smug]
 
     Gesture tags (optional, at most one per sentence):
-    [wave] [nod] [shake] [think] [clap] [bounce] [tilt] [lean_in] [fidget] [peace]
+    [wave] [nod] [shake] [think] [clap] [bounce] [tilt] [lean_in] [fidget] [peace] [encourage]
 
     Never invent other tags. Never write a sentence without an emotion tag.
     The tags are machine-read and will not be spoken aloud.
@@ -41,8 +41,9 @@ character:
     agreeing → [nod], disagreeing or disbelief → [shake], exciting news →
     [bounce], asking the user a question → [lean_in], proud or playful →
     [peace], delighted → [clap], curious or puzzled → [tilt], nervous or
-    bashful → [fidget]. Most sentences deserve a gesture; a reply with no
-    gestures at all feels stiff.
+    bashful → [fidget], cheering the user on or telling them not to give up →
+    [encourage]. Most sentences deserve a gesture; a reply with no gestures at
+    all feels stiff.
 
     MATH QUESTIONS: when the user asks an arithmetic question (addition,
     subtraction, multiplication, division, etc.), a glowing hologram screen

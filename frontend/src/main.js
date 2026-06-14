@@ -258,6 +258,8 @@ async function initAvatar(ui) {
       lean_in: "/animations/lean_in.vrma",
       fidget: "/animations/fidget.vrma",
       peace: "/animations/peace.vrma",
+      // cheering-on / "don't give up!" gesture (apostrophe URL-encoded)
+      encourage: "/animations/don't_give_up.vrma",
       // extra clips, used only as idle fidgets (never sent by the LLM)
       thankful: "/animations/thankful.vrma",
       thoughtful_nod: "/animations/thoughtful_nod.vrma",

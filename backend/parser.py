@@ -33,6 +33,7 @@ EMOTIONS = {
 GESTURES = {
     "wave", "nod", "shake", "think", "clap",
     "bounce", "tilt", "lean_in", "fidget", "peace",
+    "encourage",
 }
 
 # A complete tag is "[" + letters/underscores + "]".
