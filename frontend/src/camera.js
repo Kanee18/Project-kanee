@@ -15,6 +15,7 @@ export class CameraDirector {
     this.camera = camera;
     this.controls = controls;
     this._full = { pos: new THREE.Vector3(), target: new THREE.Vector3() };
+    this._home = { pos: new THREE.Vector3(), target: new THREE.Vector3() };
     this._from = { pos: new THREE.Vector3(), target: new THREE.Vector3() };
     this._to = { pos: new THREE.Vector3(), target: new THREE.Vector3() };
     this._return = { pos: new THREE.Vector3(), target: new THREE.Vector3() };
@@ -23,6 +24,37 @@ export class CameraDirector {
     this._phase = "idle"; // idle | toFull | hold | toHome
     this._holdLeft = 0;
     this._holdFor = 0;
+  }
+
+  /** Capture the current camera pose as "home" — the default view to snap back
+   *  to (call once after the startup framing is set). */
+  setHome() {
+    this._home.pos.copy(this.camera.position);
+    this._home.target.copy(this.controls.target);
+  }
+
+  /**
+   * Ease the camera back to the default (home) view and release control there,
+   * wherever the user had scrolled/orbited to. Used when a hidden animation
+   * fires so it's always seen from the default framing. No-op if already home.
+   */
+  returnHome() {
+    if (this._phase !== "idle") {
+      // A move is mid-flight — just retarget its homecoming to the default.
+      this._return.pos.copy(this._home.pos);
+      this._return.target.copy(this._home.target);
+      return;
+    }
+    if (
+      this.camera.position.distanceTo(this._home.pos) < 0.02 &&
+      this.controls.target.distanceTo(this._home.target) < 0.02
+    ) {
+      return; // already at the default view
+    }
+    this._return.pos.copy(this._home.pos);
+    this._return.target.copy(this._home.target);
+    this.controls.enabled = false;
+    this._begin("toHome", this._home);
   }
 
   /** Compute the full-body framing from the model's bounding box (call once). */

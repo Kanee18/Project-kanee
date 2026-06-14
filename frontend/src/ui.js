@@ -18,7 +18,14 @@ export class UI {
     if (voice) {
       const mark = document.createElement("span");
       mark.className = "mic-mark";
-      mark.textContent = "\u{1F3A4}";
+      mark.title = "Voice message";
+      // Inline mic icon (matches the footer talk button); static markup, no input.
+      mark.innerHTML =
+        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
+        'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+        '<rect x="9" y="2" width="6" height="12" rx="3"/>' +
+        '<path d="M5 10a7 7 0 0 0 14 0"/>' +
+        '<line x1="12" y1="19" x2="12" y2="22"/></svg>';
       row.appendChild(mark);
     }
     row.appendChild(document.createTextNode(text));

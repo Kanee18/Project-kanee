@@ -22,7 +22,42 @@ import { GlitchIntro } from "./intro.js";
 import { CameraDirector } from "./camera.js";
 import { VirtualWorld } from "./world.js";
 import { Hologram } from "./hologram.js";
+import { Sidebar } from "./sidebar.js";
 import { DebugOverlay } from "./debug.js"; // temporary — Step 2 diagnosis
+
+// Outfits = whole VRM swaps. "Default" is always shown; the rest appear only
+// if their file exists under assets/outfits/. Add entries here for more.
+const OUTFITS = [
+  { name: "Default", url: "/character.vrm" },
+  { name: "Casual", url: "/outfits/casual.vrm" },
+  { name: "Uniform", url: "/outfits/uniform.vrm" },
+  { name: "Dress", url: "/outfits/dress.vrm" },
+  { name: "Swimsuit", url: "/outfits/swimsuit.vrm" },
+];
+
+// Emotes = one-shot expression clips under assets/emotes/. Registered as
+// gestures and offered in the sidebar; missing files are skipped gracefully.
+const EMOTES = [
+  { key: "emote_kawaii", label: "Kawaii", url: "/emotes/Kawaii%20Kaiwai.vrma" },
+];
+
+/** HEAD-probe a static URL so the sidebar only lists outfits that exist. */
+async function urlExists(url) {
+  try {
+    const r = await fetch(url, { method: "HEAD" });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function probeOutfits() {
+  const available = [];
+  for (const o of OUTFITS) {
+    if (o.url === "/character.vrm" || (await urlExists(o.url))) available.push(o);
+  }
+  return available;
+}
 
 // Avatar modules appear here once the VRM finishes loading; everything that
 // uses them must tolerate null (VRM missing → chat-only mode still works).
@@ -206,47 +241,17 @@ async function initAvatar(ui) {
   new ResizeObserver(resize).observe(viewport);
   resize();
 
-  try {
-    const loader = new GLTFLoader();
-    loader.register((p) => new VRMLoaderPlugin(p));
-    const gltf = await loader.loadAsync("/character.vrm");
-    const vrm = gltf.userData.vrm;
-    VRMUtils.removeUnnecessaryVertices(gltf.scene);
-    VRMUtils.combineSkeletons(gltf.scene);
-    VRMUtils.rotateVRM0(vrm); // VRM 0.x faces -Z; make every model face the camera
-    vrm.scene.traverse((obj) => (obj.frustumCulled = false)); // avoids mesh pop-out
-    scene.add(vrm.scene);
+  // Camera director persists across outfit swaps; framing is captured once.
+  const director = new CameraDirector(camera, controls);
+  avatar.cameraDirector = director;
 
-    // Auto-frame from the model's actual proportions: eye-level camera at
-    // portrait distance, face in the upper third. Works for any model height
-    // (hardcoded values framed short models too small / too low).
-    vrm.scene.updateMatrixWorld(true);
-    const headNode =
-      vrm.humanoid?.getNormalizedBoneNode("head") ?? vrm.humanoid?.getRawBoneNode("head");
-    if (headNode) {
-      const headPos = new THREE.Vector3();
-      headNode.getWorldPosition(headPos);
-      const eyeY = headPos.y + 0.06;            // head bone sits at the neck end
-      camera.position.set(0, eyeY, 1.05);       // eye-level, bust-up distance
-      controls.target.set(0, eyeY - 0.15, 0);   // aim at upper chest → face upper third
-      controls.update();
-    }
+  const loader = new GLTFLoader();
+  loader.register((p) => new VRMLoaderPlugin(p));
 
-    // Full-body framing for emotes is computed from the model's bounds.
-    const director = new CameraDirector(camera, controls);
-    director.frameFromModel(vrm.scene);
-    avatar.cameraDirector = director;
-    frontAzimuth = controls.getAzimuthalAngle(); // re-capture after framing
-
-    const animations = new AnimationController(vrm);
-    await animations.loadIdles([
-      "/animations/idle_01.vrma",
-      // idle_02 removed from rotation: clip motion wasn't smooth (user call).
-      // Re-add the line when a better clip is available.
-      "/animations/idle_03.vrma",
-    ]);
-    animations.start();
-    await animations.loadGestures({
+  // Full gesture spec (protocol + idle fidgets + math + emotes). Rebuilt per
+  // model load because clips retarget to the specific VRM humanoid.
+  function gestureSpec() {
+    const spec = {
       // protocol gestures (LLM-triggered)
       wave: "/animations/wave.vrma",
       nod: "/animations/nod.vrma",
@@ -258,50 +263,117 @@ async function initAvatar(ui) {
       lean_in: "/animations/lean_in.vrma",
       fidget: "/animations/fidget.vrma",
       peace: "/animations/peace.vrma",
-      // cheering-on / "don't give up!" gesture (apostrophe URL-encoded)
+      // cheering-on / "don't give up!" gesture
       encourage: "/animations/don't_give_up.vrma",
       // extra clips, used only as idle fidgets (never sent by the LLM)
       thankful: "/animations/thankful.vrma",
       thoughtful_nod: "/animations/thoughtful_nod.vrma",
       spin: "/animations/spin.vrma",
-      // full-body, precise: play at near-full weight so the body lean reads
-      // fully and the hand reaches the head. keepRoot replays the clip's baked
-      // forward step as a smooth avatar translation (delta-driven, no pop), so
-      // she walks up toward the mirror and glides back when she's done.
+      // full-body, precise: near-full weight so the body lean reads and the
+      // hand reaches the head; keepRoot replays the baked forward step as a
+      // smooth avatar translation (no pop), then glides home when done.
       tidy_up_hair: { url: "/animations/tidy_up_hair.vrma", blend: 0.97, keepRoot: true },
-      // emote clip for the emote button (assets/emotes/, space URL-encoded)
-      kawaii: "/emotes/Kawaii%20Kaiwai.vrma",
       // math-answer presenting gesture (paired with the hologram)
       answare_math: "/animations/answare_math.vrma",
-    });
-    // Hidden idle animations: occasionally play one of these when she has
-    // been still for a while, so she never reads as frozen.
+    };
+    for (const e of EMOTES) spec[e.key] = e.url; // emotes play through the gesture path
+    return spec;
+  }
+
+  /** Build a fresh controller set bound to `vrm` (not yet swapped into avatar). */
+  async function buildControllers(vrm) {
+    const animations = new AnimationController(vrm);
+    await animations.loadIdles([
+      "/animations/idle_01.vrma",
+      // idle_02 removed from rotation: clip motion wasn't smooth (user call).
+      "/animations/idle_03.vrma",
+    ]);
+    animations.start();
+    await animations.loadGestures(gestureSpec());
+    // Hidden idle animations: occasionally play one when she's been still.
     animations.setFidgetPool(["peace", "think", "thankful", "thoughtful_nod", "spin", "tidy_up_hair"]);
-    // Optional state base loops — supply these files and they're used
-    // automatically (graceful fallback to idle while absent).
     await animations.loadStateLoops({
       speaking: "/animations/explain.vrma", // the talking/explaining body animation
       listening: "/animations/listening_01.vrma",
       thinking: "/animations/thinking_01.vrma",
     });
-
-    avatar.vrm = vrm;
-    avatar.animations = animations;
-    avatar.lipsync = new LipSync(vrm);
-    avatar.motion = new MotionController(vrm, camera, scene, {
+    const lipsync = new LipSync(vrm);
+    const motion = new MotionController(vrm, camera, scene, {
       speechLevel: () => avatar.lipsync?.level ?? 0,
       onEmphasis: () => avatar.expressions?.pulseEmphasis(),
     });
-    avatar.expressions = new ExpressionController(vrm, avatar.motion);
+    const expressions = new ExpressionController(vrm, motion);
     // Gesture clips get anticipation + release overshoot from the procedural layer.
     animations.onGestureStart = () => avatar.motion?.anticipate();
     animations.onGestureEnd = () => avatar.motion?.gestureRelease();
+    return { animations, motion, expressions, lipsync };
+  }
+
+  /**
+   * Load a VRM and swap it in as the active avatar. firstLoad frames the camera
+   * (outfits of the same character share proportions, so swaps keep the view).
+   * The new model + its controllers are built BEFORE the swap, so the render
+   * loop keeps driving the current model until the new one is fully ready.
+   */
+  async function loadOutfit(url, firstLoad) {
+    const gltf = await loader.loadAsync(url);
+    const vrm = gltf.userData.vrm;
+    VRMUtils.removeUnnecessaryVertices(gltf.scene);
+    VRMUtils.combineSkeletons(gltf.scene);
+    VRMUtils.rotateVRM0(vrm); // VRM 0.x faces -Z; make every model face the camera
+    vrm.scene.traverse((obj) => (obj.frustumCulled = false)); // avoids mesh pop-out
+
+    const built = await buildControllers(vrm);
+
+    if (firstLoad) {
+      // Auto-frame from the model's actual proportions: eye-level camera at
+      // portrait distance, face in the upper third.
+      vrm.scene.updateMatrixWorld(true);
+      const headNode =
+        vrm.humanoid?.getNormalizedBoneNode("head") ?? vrm.humanoid?.getRawBoneNode("head");
+      if (headNode) {
+        const headPos = new THREE.Vector3();
+        headNode.getWorldPosition(headPos);
+        const eyeY = headPos.y + 0.06;            // head bone sits at the neck end
+        camera.position.set(0, eyeY, 1.05);       // eye-level, bust-up distance
+        controls.target.set(0, eyeY - 0.15, 0);   // aim at upper chest → face upper third
+        controls.update();
+      }
+      director.frameFromModel(vrm.scene);
+      director.setHome(); // the bust-up framing is the default view to snap back to
+      frontAzimuth = controls.getAzimuthalAngle();
+    }
+
+    // Atomic swap — synchronous, so the render loop can't see a half-built state.
+    const old = avatar.vrm;
+    scene.add(vrm.scene);
+    avatar.vrm = vrm;
+    avatar.animations = built.animations;
+    avatar.motion = built.motion;
+    avatar.expressions = built.expressions;
+    avatar.lipsync = built.lipsync;
+    avatar.expressions.speaking = backendState === "speaking";
     if (player.analyser) avatar.lipsync.setAnalyser(player.analyser);
     debug.attach(vrm, () => avatar.lipsync?.level ?? 0);
-    // Welcome: as she finishes materializing, wave hello with a smile.
+    if (old) {
+      scene.remove(old.scene);
+      VRMUtils.deepDispose(old.scene); // free the previous outfit's GPU resources
+    }
+
+    // Glitch-materialize the (new) outfit, then wave hello with a smile.
     intro.onWelcome = playWelcome;
-    intro.begin(vrm.scene); // glitch-materialize instead of popping in
-    console.info("avatar ready");
+    intro.begin(vrm.scene);
+    refreshState(); // resync the fresh controllers to the current chat state
+    console.info(firstLoad ? "avatar ready" : `outfit changed: ${url}`);
+  }
+
+  setOutfit = (url) => loadOutfit(url, false);
+
+  try {
+    await loadOutfit("/character.vrm", true);
+    // Populate the sidebar now that the model + its clips are known.
+    sidebar.setEmotes(EMOTES.filter((e) => avatar.animations?.hasGesture(e.key)));
+    sidebar.setOutfits(await probeOutfits(), "/character.vrm");
   } catch (err) {
     console.warn("could not load /character.vrm:", err);
     msgEl.hidden = false;
@@ -399,6 +471,13 @@ async function initAvatar(ui) {
 const ui = new UI();
 const ws = new WSClient();
 const debug = new DebugOverlay();
+
+// Customization sidebar: outfit swap + emote picker (wired to the avatar below).
+let setOutfit = async () => {}; // assigned once the avatar pipeline initializes
+const sidebar = new Sidebar({
+  onOutfit: (url) => setOutfit(url),
+  onEmote: (key) => triggerEmote(key),
+});
 
 let backendState = "idle";
 let micHeld = false;
@@ -575,8 +654,8 @@ function sendOrToast(msg) {
 }
 
 // ---------------------------------------------------------------------------
-// emote button (left of the message bar) — plays the Kawaii emote + a brief
-// happy expression
+// emotes — chosen from the sidebar; play the clip + a brief happy expression
+// and pull the camera out to a full-body shot for its duration
 // ---------------------------------------------------------------------------
 
 let emoteCalmTimer = null;
@@ -596,12 +675,13 @@ function playWelcome() {
   }, (dur + 0.8) * 1000);
 }
 
-document.getElementById("emote").addEventListener("click", () => {
+/** Play an emote clip by gesture key (called by the sidebar emote picker). */
+function triggerEmote(key) {
   // Clear any hidden animation in progress so the emote doesn't collide with
   // it: a procedural fidget's impulses are dropped, and an active clip fidget
   // is replaced (faded out) rather than queued behind.
   avatar.motion?.clearImpulses();
-  const dur = avatar.animations?.playGesture("kawaii", { replace: true }) || 3;
+  const dur = avatar.animations?.playGesture(key, { replace: true }) || 3;
   avatar.expressions?.playEmote(dur); // held smile, eyes open (no blink/winks)
   avatar.motion?.setEmotion("happy"); // happy body posture
   // Pull the camera out to a full-body shot for the length of the clip
@@ -621,7 +701,7 @@ document.getElementById("emote").addEventListener("click", () => {
       avatar.motion?.setEmotion("neutral");
     }
   }, (dur + 0.6) * 1000);
-});
+}
 
 // ---------------------------------------------------------------------------
 // idle fidgets — after 15-25 s of true idle, play either a hidden gesture
@@ -666,9 +746,14 @@ setInterval(() => {
   }
   if (Date.now() - lastActivityAt >= nextFidgetMs) {
     if (Math.random() < 0.5) {
-      // Clip fidget (the hidden animations) — lock zoom for its duration.
+      // Clip fidget (the hidden animations) — snap the camera back to the
+      // default view (wherever the user had zoomed/orbited) and lock zoom for
+      // its duration, so the animation always plays from the default framing.
       const dur = avatar.animations?.playRandomFidget() || 0;
-      if (dur > 0) lockZoom(dur + 0.6);
+      if (dur > 0) {
+        avatar.cameraDirector?.returnHome();
+        lockZoom(dur + 0.6);
+      }
     } else {
       avatar.motion?.proceduralFidget(); // subtle, in-place — no zoom lock needed
     }

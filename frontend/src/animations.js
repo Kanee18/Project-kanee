@@ -225,6 +225,11 @@ export class AnimationController {
     return duration;
   }
 
+  /** True if a gesture clip with this name loaded successfully. */
+  hasGesture(name) {
+    return this._gestures.has(name);
+  }
+
   /** Names eligible as idle fidgets (silently filtered to loaded clips). */
   setFidgetPool(names) {
     this._fidgetPool = names.filter((n) => this._gestures.has(n));
