@@ -7,6 +7,7 @@ turning the stream into tagged sentence segments is parser.py's job.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import logging
 import re
@@ -43,6 +44,7 @@ class LLMClient:
         self.memory: list[str] = self._load_memory()
         self._memory_lock = asyncio.Lock()
         self._bg_tasks: set[asyncio.Task[Any]] = set()
+        self._turn_note = ""  # transient per-turn directive injected into the system prompt
         # Materialize the file right away so it's visibly present and starts
         # populating as facts are learned (rather than appearing only on the
         # first successful extraction).
@@ -77,6 +79,9 @@ class LLMClient:
         turn (with tags intact, to keep the persona consistent) is appended
         and persisted once the stream completes.
         """
+        # Detect a repeated question (vs. prior turns) BEFORE appending this one,
+        # so she can tease the user for asking the same thing again.
+        self._turn_note = self._repeat_note(user_text)
         self.history.append({"role": "user", "content": user_text})
         t0 = time.perf_counter()
         first_chunk_at: float | None = None
@@ -131,6 +136,8 @@ class LLMClient:
         mem = self._memory_block()
         if mem:
             system.append({"type": "text", "text": mem})
+        if self._turn_note:
+            system.append({"type": "text", "text": self._turn_note})
         async with self._client.messages.stream(
             model=self.model,
             max_tokens=self.max_tokens,
@@ -224,9 +231,47 @@ class LLMClient:
         )
 
     def _system_text(self) -> str:
-        """Persona + memory block, for providers that take a single string."""
-        mem = self._memory_block()
-        return f"{self.system_prompt}\n\n{mem}" if mem else self.system_prompt
+        """Persona + memory + this turn's note, for single-string providers."""
+        extra = "\n\n".join(b for b in (self._memory_block(), self._turn_note) if b)
+        return f"{self.system_prompt}\n\n{extra}" if extra else self.system_prompt
+
+    # -- repeated-question detection ----------------------------------------
+
+    @staticmethod
+    def _normalize(text: str) -> str:
+        """Lowercase, strip punctuation, collapse whitespace — for comparison."""
+        t = re.sub(r"[^a-z0-9\s]+", " ", text.lower())
+        return re.sub(r"\s+", " ", t).strip()
+
+    @classmethod
+    def _similar(cls, a_norm: str, b_text: str) -> bool:
+        b = cls._normalize(b_text)
+        if not a_norm or not b:
+            return False
+        if a_norm == b:
+            return True
+        return difflib.SequenceMatcher(None, a_norm, b).ratio() >= 0.85
+
+    def _repeat_note(self, user_text: str) -> str:
+        """A directive when the user keeps asking the same thing, so she can
+        tease them for it. Counts near-identical PRIOR user turns in history."""
+        norm = self._normalize(user_text)
+        if len(norm) < 4:
+            return ""  # ignore trivial "hi"/"ok"-type messages
+        repeats = sum(
+            1 for m in self.history if m.get("role") == "user" and self._similar(norm, m.get("content", ""))
+        )
+        if repeats == 0:
+            return ""
+        times = repeats + 1
+        logger.info("repeated question detected (%d times): %r", times, user_text[:60])
+        return (
+            f"CONTEXT (not spoken by the user): they have now asked essentially the "
+            f"same thing {times} times in this conversation. Stay fully in character, "
+            f"but call it out — tease or mock them playfully for repeating themselves "
+            f"(sharper the more they repeat), then still give your answer. Keep it "
+            f"good-natured, never genuinely harsh."
+        )
 
     def _schedule_memory_update(self, user_text: str, reply: str) -> None:
         """Fire-and-forget the fact extraction so it never blocks the reply."""
