@@ -32,8 +32,8 @@ const OUTFITS = [
   { name: "Casual", url: "/Kanee_casual_outfit.vrm" },
   // Add more here; files live under assets/ (served at the web root). Entries
   // whose file is missing are probed out and hidden from the sidebar.
-  { name: "Uniform", url: "/outfits/uniform.vrm" },
-  { name: "Dress", url: "/outfits/dress.vrm" },
+  { name: "Uniform", url: "/kanee_uniform_outfit.vrm" },
+  { name: "Dress", url: "/kanee_dress_outfit.vrm" },
 ];
 
 // Emotes = one-shot expression clips under assets/emotes/. Registered as
