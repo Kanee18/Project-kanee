@@ -799,11 +799,11 @@ function sendOrToast(msg) {
 // ---------------------------------------------------------------------------
 
 const GREETINGS = {
-  morning: { text: "Good morning! Did you sleep okay?", emotion: "happy", gesture: "wave" },
-  afternoon: { text: "Good afternoon! How's your day going?", emotion: "happy", gesture: "wave" },
-  evening: { text: "Good evening! Welcome back.", emotion: "happy", gesture: "wave" },
-  night: { text: "It's getting late... don't stay up too long, okay?", emotion: "curious", gesture: "tilt" },
-  welcome_back: { text: "Oh, you're back! I missed you.", emotion: "excited", gesture: "bounce" },
+  morning: { text: "Morning. Hmph, you actually woke up on time for once.", emotion: "smug", gesture: "wave" },
+  afternoon: { text: "Oh, it's you. ...What, I wasn't waiting or anything.", emotion: "shy", gesture: "fidget" },
+  evening: { text: "Evening. You're back, huh. ...Good.", emotion: "happy", gesture: "wave" },
+  night: { text: "It's super late, you know. ...Go to bed already. For your own sake, idiot.", emotion: "pout", gesture: "shake" },
+  welcome_back: { text: "You're back! I—I mean, took you long enough.", emotion: "shy", gesture: "fidget" },
 };
 
 /** Local time → greeting slot. */
