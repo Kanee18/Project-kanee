@@ -7,4 +7,5 @@ google-genai
 httpx
 pyyaml
 python-dotenv
+psutil
 pytest

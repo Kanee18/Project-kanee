@@ -760,6 +760,9 @@ ws.on("reply_done", () => {
   // The hologram is on its own 8.16 s timer from when the animation started,
   // so nothing to show here — just drop a math answer that never got a segment.
   if (!mathActive) pendingMath = null;
+  // Start a fresh chat bubble for whatever speaks next (next reply, or a
+  // proactive game comment) so they don't merge into one row.
+  ui.newReply();
 });
 ws.on("error", (msg) => {
   ui.toast(msg.message);

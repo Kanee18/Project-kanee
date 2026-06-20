@@ -21,6 +21,7 @@ import binascii
 import json
 import logging
 import time
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
@@ -29,6 +30,7 @@ import yaml
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from asr import Transcriber
+from game_watcher import GameWatcher
 from llm import LLMClient
 from math_solver import solve as solve_math
 from parser import Segment, StreamingTagParser
@@ -74,6 +76,7 @@ class Session:
         self.ws = ws
         self.pipe = pipeline
         self._task: Optional[asyncio.Task] = None
+        self._game_events: deque[tuple[str, str, Optional[float]]] = deque(maxlen=3)
 
     async def send(self, msg: dict[str, Any]) -> None:
         await self.ws.send_text(json.dumps(msg))
@@ -85,8 +88,10 @@ class Session:
         if kind == "user_text":
             text = str(msg.get("text") or "").strip()
             if text:
+                self._game_events.clear()  # the user is talking — drop stale game banter
                 self._start(self._reply(text))
         elif kind == "user_audio":
+            self._game_events.clear()
             self._start(self._voice_reply(str(msg.get("audio") or "")))
         elif kind == "interrupt":
             await self.cancel_reply()
@@ -155,66 +160,108 @@ class Session:
             if math is not None:
                 logger.info("math: %s = %s", math["expr"], math["answer"])
                 await self.send({"type": "math", "expr": math["expr"], "answer": math["answer"]})
-            parser = StreamingTagParser()
-            seg_q: asyncio.Queue[Optional[Segment]] = asyncio.Queue()
-            llm_error: Optional[Exception] = None
-            n_parsed = 0
+            await self._stream_segments(self.pipe.llm.stream_reply(user_text), t0)
 
-            async def produce() -> None:
-                nonlocal llm_error, n_parsed
-                try:
-                    async for chunk in self.pipe.llm.stream_reply(user_text):
-                        for seg in parser.feed(chunk):
-                            n_parsed += 1
-                            await seg_q.put(seg)
-                    for seg in parser.finish():
+    async def comment_on_game(self, kind: str, game: str, minutes: Optional[float] = None) -> None:
+        """Proactively comment on the game the user is playing (no thinking
+        state, no math)."""
+        cue = self._game_cue(kind, game, minutes)
+        async with self.pipe.reply_lock:
+            t0 = time.perf_counter()
+            await self._stream_segments(self.pipe.llm.stream_comment(cue), t0)
+
+    @staticmethod
+    def _game_cue(kind: str, game: str, minutes: Optional[float]) -> str:
+        if kind == "start":
+            return f"The user just opened and started playing the game '{game}'."
+        if kind == "ambient":
+            return f"The user is still playing '{game}' right now."
+        if kind == "stop":
+            if minutes is not None and minutes < 2:
+                return f"The user opened '{game}' but closed it again almost immediately (under two minutes)."
+            if minutes is not None and minutes >= 90:
+                return f"The user just closed '{game}' after a very long session (about {minutes / 60:.1f} hours)."
+            if minutes is not None:
+                return f"The user just closed '{game}' after about {minutes:.0f} minutes of playing."
+            return f"The user just closed '{game}'."
+        return f"The user is playing '{game}'."
+
+    async def _stream_segments(self, token_iter, t0: float) -> None:
+        """Parse an LLM token stream into tagged segments, synth each via TTS,
+        and stream them to the client. Shared by replies and game comments."""
+        parser = StreamingTagParser()
+        seg_q: asyncio.Queue[Optional[Segment]] = asyncio.Queue()
+        llm_error: Optional[Exception] = None
+        n_parsed = 0
+
+        async def produce() -> None:
+            nonlocal llm_error, n_parsed
+            try:
+                async for chunk in token_iter:
+                    for seg in parser.feed(chunk):
                         n_parsed += 1
                         await seg_q.put(seg)
-                except Exception as exc:
-                    llm_error = exc
-                finally:
-                    await seg_q.put(None)
+                for seg in parser.finish():
+                    n_parsed += 1
+                    await seg_q.put(seg)
+            except Exception as exc:
+                llm_error = exc
+            finally:
+                await seg_q.put(None)
 
-            async def synth_and_send() -> None:
-                tts_down = self.pipe.tts is None
-                first_sent = False
-                while True:
-                    seg = await seg_q.get()
-                    if seg is None:
-                        break
-                    audio_b64: Optional[str] = None
-                    if not tts_down:
-                        try:
-                            wav = await self.pipe.tts.synthesize(seg.text)
-                            audio_b64 = base64.b64encode(wav).decode("ascii")
-                        except TTSUnavailableError as exc:
-                            tts_down = True  # stop trying for this reply
-                            await self.send({"type": "error", "message": str(exc)})
-                        except TTSRequestError as exc:
-                            logger.warning("TTS rejected segment, continuing: %s", exc)
-                    if not first_sent:
-                        first_sent = True
-                        await self.send({"type": "state", "value": "speaking"})
-                        logger.info(
-                            "first segment sent at +%.2fs (audio: %s)",
-                            time.perf_counter() - t0, "yes" if audio_b64 else "no",
-                        )
-                    await self.send(
-                        {
-                            "type": "segment",
-                            "text": seg.text,
-                            "emotion": seg.emotion,
-                            "gesture": seg.gesture,
-                            "audio": audio_b64,
-                        }
+        async def synth_and_send() -> None:
+            tts_down = self.pipe.tts is None
+            first_sent = False
+            while True:
+                seg = await seg_q.get()
+                if seg is None:
+                    break
+                audio_b64: Optional[str] = None
+                if not tts_down:
+                    try:
+                        wav = await self.pipe.tts.synthesize(seg.text)
+                        audio_b64 = base64.b64encode(wav).decode("ascii")
+                    except TTSUnavailableError as exc:
+                        tts_down = True  # stop trying for this reply
+                        await self.send({"type": "error", "message": str(exc)})
+                    except TTSRequestError as exc:
+                        logger.warning("TTS rejected segment, continuing: %s", exc)
+                if not first_sent:
+                    first_sent = True
+                    await self.send({"type": "state", "value": "speaking"})
+                    logger.info(
+                        "first segment sent at +%.2fs (audio: %s)",
+                        time.perf_counter() - t0, "yes" if audio_b64 else "no",
                     )
+                await self.send(
+                    {
+                        "type": "segment",
+                        "text": seg.text,
+                        "emotion": seg.emotion,
+                        "gesture": seg.gesture,
+                        "audio": audio_b64,
+                    }
+                )
 
-            await asyncio.gather(produce(), synth_and_send())
-            if llm_error is not None:
-                raise llm_error
-            await self.send({"type": "reply_done"})
-            await self.send({"type": "state", "value": "idle"})
-            logger.info("reply done: %d segment(s) in %.2fs", n_parsed, time.perf_counter() - t0)
+        await asyncio.gather(produce(), synth_and_send())
+        if llm_error is not None:
+            raise llm_error
+        await self.send({"type": "reply_done"})
+        await self.send({"type": "state", "value": "idle"})
+        logger.info("reply done: %d segment(s) in %.2fs", n_parsed, time.perf_counter() - t0)
+
+    def maybe_comment(self, kind: str, game: str, minutes: Optional[float] = None) -> None:
+        """Queue a game comment (called by the GameWatcher). Drained only when
+        idle, so it never preempts a real reply — and an open-then-close fires
+        both lines in order. A user message clears the queue."""
+        self._game_events.append((kind, game, minutes))
+        if self._task is None or self._task.done():
+            self._start(self._drain_game_events())
+
+    async def _drain_game_events(self) -> None:
+        while self._game_events:
+            kind, game, minutes = self._game_events.popleft()
+            await self.comment_on_game(kind, game, minutes)
 
 
 @app.websocket("/ws")
@@ -222,6 +269,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     session = Session(websocket, websocket.app.state.pipeline)
     logger.info("websocket connected")
+    # Watch for games in the foreground and let her comment proactively.
+    watcher = GameWatcher(session.maybe_comment)
+    watcher.start()
     try:
         while True:
             raw = await websocket.receive_text()
@@ -234,4 +284,5 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         logger.info("websocket disconnected")
     finally:
+        await watcher.stop()
         await session.cancel_reply()

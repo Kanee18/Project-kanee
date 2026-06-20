@@ -91,7 +91,7 @@ class LLMClient:
             "openai": self._stream_openai,
             "google": self._stream_google,
         }
-        stream = streamers[self.provider]()
+        stream = streamers[self.provider](list(self.history))
         try:
             async for chunk in stream:
                 if first_chunk_at is None:
@@ -121,9 +121,31 @@ class LLMClient:
         self._schedule_memory_update(user_text, reply)
         logger.info("LLM reply complete: %d chars in %.2fs", len(reply), time.perf_counter() - t0)
 
+    async def stream_comment(self, cue: str) -> AsyncIterator[str]:
+        """Proactive in-character comment from a live system cue (e.g. a game
+        the user just opened). The cue is shown to the model as context but is
+        NOT stored in history and skips repeat-detection — it's ephemeral
+        banter, not part of the conversation transcript."""
+        directive = (
+            "SYSTEM EVENT — the user did NOT type this; it is a live cue about "
+            f"what they are doing on their computer right now: {cue} "
+            "React with ONE short, in-character spoken line about it, like you're "
+            "hanging out watching them play. Use your usual personality (tease, "
+            "cheer them on, act aloof) and the tag protocol as always."
+        )
+        self._turn_note = ""  # no repeat-detection for proactive comments
+        messages = [*self.history, {"role": "user", "content": directive}]
+        streamers = {
+            "anthropic": self._stream_anthropic,
+            "openai": self._stream_openai,
+            "google": self._stream_google,
+        }
+        async for chunk in streamers[self.provider](messages):
+            yield chunk
+
     # -- providers ----------------------------------------------------------
 
-    async def _stream_anthropic(self) -> AsyncIterator[str]:
+    async def _stream_anthropic(self, messages: list[dict[str, str]]) -> AsyncIterator[str]:
         # Persona is the stable, cacheable prefix; the memory block is a
         # separate, uncached block since it changes as facts are learned.
         system: list[dict[str, Any]] = [
@@ -142,23 +164,23 @@ class LLMClient:
             model=self.model,
             max_tokens=self.max_tokens,
             system=system,
-            messages=list(self.history),
+            messages=messages,
         ) as stream:
             async for text in stream.text_stream:
                 yield text
 
-    async def _stream_openai(self) -> AsyncIterator[str]:
+    async def _stream_openai(self, messages: list[dict[str, str]]) -> AsyncIterator[str]:
         stream = await self._client.chat.completions.create(
             model=self.model,
             max_tokens=self.max_tokens,
             stream=True,
-            messages=[{"role": "system", "content": self._system_text()}, *self.history],
+            messages=[{"role": "system", "content": self._system_text()}, *messages],
         )
         async for event in stream:
             if event.choices and event.choices[0].delta and event.choices[0].delta.content:
                 yield event.choices[0].delta.content
 
-    async def _stream_google(self) -> AsyncIterator[str]:
+    async def _stream_google(self, messages: list[dict[str, str]]) -> AsyncIterator[str]:
         from google.genai import types
 
         # Gemini uses role "model" for the assistant and nests text under
@@ -168,7 +190,7 @@ class LLMClient:
                 "role": "model" if m["role"] == "assistant" else "user",
                 "parts": [{"text": m["content"]}],
             }
-            for m in self.history
+            for m in messages
         ]
         stream = await self._client.aio.models.generate_content_stream(
             model=self.model,
