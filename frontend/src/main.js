@@ -564,7 +564,14 @@ async function initAvatar(ui) {
 
   const clock = new THREE.Clock();
   renderer.setAnimationLoop(() => {
-    const delta = clock.getDelta();
+    // When the tab is minimized/backgrounded the render loop pauses, so the
+    // first frame back reports a huge raw delta (minutes). Clamp it so the
+    // mixer/motion damping don't lurch — and on such a resume, RESET the spring
+    // bones so the sim snaps to the current pose with zero velocity instead of
+    // integrating the giant gap (which flings the hair/skirt up).
+    const rawDelta = clock.getDelta();
+    const delta = Math.min(rawDelta, 0.05);
+    const resumed = rawDelta > 0.5;
     // The cinematic director owns the camera while moving; otherwise OrbitControls.
     const cinematic = avatar.cameraDirector ? avatar.cameraDirector.update(delta) : false;
     if (!cinematic) controls.update();
@@ -575,7 +582,10 @@ async function initAvatar(ui) {
     if (avatar.motion) avatar.motion.update(delta);         // layer 3: procedural additive
     if (avatar.expressions) avatar.expressions.update(delta);
     if (avatar.lipsync) avatar.lipsync.update(delta);
-    if (avatar.vrm) avatar.vrm.update(delta);               // look-at, expressions, spring bones
+    if (avatar.vrm) {
+      if (resumed) avatar.vrm.springBoneManager?.reset();   // skip the catch-up explosion
+      avatar.vrm.update(delta);                             // look-at, expressions, spring bones
+    }
     if (avatar.motion) avatar.motion.revert();              // offsets must never accumulate
     hologram.update(camera);                                // re-project the fixed math hologram
     debug.update(delta);
@@ -830,7 +840,9 @@ function fireArrivalGreeting() {
   greeted = true;
   window.removeEventListener("pointerdown", fireArrivalGreeting);
   window.removeEventListener("keydown", fireArrivalGreeting);
-  setTimeout(() => playGreeting(timeSlot()), 300); // let the spawn wave settle first
+  // Small delay so the just-resumed AudioContext is ready; the greeting itself
+  // carries the hello wave (the spawn no longer waves, so there's no double-up).
+  setTimeout(() => playGreeting(timeSlot()), 200);
 }
 window.addEventListener("pointerdown", fireArrivalGreeting);
 window.addEventListener("keydown", fireArrivalGreeting);
@@ -856,9 +868,9 @@ document.addEventListener("visibilitychange", () => {
 let emoteCalmTimer = null;
 let emoteActiveTimer = null;
 
-/** Welcome greeting on first materialize: wave hello with a smile. */
+/** On first materialize: just a warm smile. The hello WAVE + spoken line come
+ *  from the arrival greeting (on first interaction), so we don't wave twice. */
 function playWelcome() {
-  const dur = avatar.animations?.playGesture("wave", { replace: true }) || 2.5;
   avatar.expressions?.setEmotion("happy");
   avatar.motion?.setEmotion("happy");
   clearTimeout(emoteCalmTimer);
@@ -867,7 +879,7 @@ function playWelcome() {
       avatar.expressions?.reset();
       avatar.motion?.setEmotion("neutral");
     }
-  }, (dur + 0.8) * 1000);
+  }, 3000);
 }
 
 /** Play an emote clip by gesture key (called by the sidebar emote picker). */
@@ -977,6 +989,9 @@ function lockZoom(seconds) {
 }
 
 setInterval(() => {
+  // Don't start fidgets while the tab is hidden: the render loop is paused, so
+  // the clip would freeze mid-pose and then lurch on resume.
+  if (document.hidden) return;
   // An active emote counts as activity: this both blocks a fidget from firing
   // mid-emote and resets the timer so none fires the instant the emote ends.
   const trulyIdle = backendState === "idle" && !player.playing && !micHeld && !emoteActive;
