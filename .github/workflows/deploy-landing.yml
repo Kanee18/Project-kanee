@@ -36,12 +36,27 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: landing/package-lock.json
 
+      # If the deploy secret isn't set yet, skip the rest gracefully (green run)
+      # instead of failing. Set FIREBASE_SERVICE_ACCOUNT to enable auto-deploy.
+      - name: Check deploy config
+        id: check
+        env:
+          SA: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$SA" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Skipping deploy — set the FIREBASE_SERVICE_ACCOUNT secret (and the FIREBASE_* variables) to enable auto-deploy. See landing/SETUP.md."
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
       # Recreate the gitignored shared Firebase config from repo variables.
       - name: Write shared/firebase-config.js
+        if: steps.check.outputs.ready == 'true'
         run: |
           cat > shared/firebase-config.js <<'EOF'
           export const firebaseConfig = {
@@ -58,12 +73,14 @@ jobs:
           EOF
 
       - name: Install & build
+        if: steps.check.outputs.ready == 'true'
         working-directory: landing
         run: |
           npm ci
           npm run build
 
       - name: Deploy to Firebase Hosting (landing target)
+        if: steps.check.outputs.ready == 'true'
         uses: FirebaseExtended/action-hosting-deploy@v0
         with:
           repoToken: ${{ secrets.GITHUB_TOKEN }}
