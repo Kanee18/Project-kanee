@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { useAuth } from "../AuthContext.jsx";
 import { useUI } from "../ui.jsx";
 import { CHAT_URL, BETA_CONTACT } from "../../../shared/firebase-config.js";
-import { Mic, Sparkle, Brain, Gamepad, Chat, Heart, Check, ArrowRight } from "../icons.jsx";
+import { Mic, Sparkle, Brain, Gamepad, Chat, Heart, Check, ArrowRight, Logo } from "../icons.jsx";
 
 const contactHref = `mailto:${BETA_CONTACT}?subject=${encodeURIComponent(
   "Kanee beta access request"
@@ -74,27 +74,28 @@ function HeroCta() {
   );
 }
 
-function ChatPreview() {
+function Portrait() {
   return (
-    <div className="preview" aria-hidden="true">
-      <div className="preview-glow" />
-      <div className="preview-card">
-        <div className="preview-head">
-          <span className="dot live" /> Kanee · live
+    <div className="portrait" aria-hidden="true">
+      <div className="portrait-glow" />
+      <div className="portrait-frame">
+        {/* Drop a transparent render at landing/public/character-hero.png to
+            replace the fallback below — it appears automatically. */}
+        <img
+          src="/character-hero.png"
+          alt=""
+          className="portrait-img"
+          onError={(e) => { e.currentTarget.style.display = "none"; }}
+        />
+        <div className="portrait-fallback">
+          <span className="portrait-mark"><Logo width={30} height={30} /></span>
+          <span className="portrait-name">Kanee</span>
+          <span className="portrait-tag">your companion</span>
         </div>
-        <div className="bubble kanee">
+        <div className="portrait-badge"><span className="dot live" /> Live · voice + text</div>
+        <div className="portrait-chip">
           <span className="who">Kanee</span>
-          <p>Oh, it's you. …What, I wasn't waiting or anything.</p>
-          <div className="tags"><span>shy</span><span>fidget</span></div>
-        </div>
-        <div className="bubble you">
-          <span className="who">You</span>
-          <p>I missed talking to you today.</p>
-        </div>
-        <div className="bubble kanee">
-          <span className="who">Kanee</span>
-          <p>D-don't just say things like that… Hmph. …Fine, I missed you too. A little.</p>
-          <div className="tags"><span>happy</span><span>bounce</span></div>
+          <p>…What, I wasn't waiting or anything.</p>
         </div>
       </div>
     </div>
@@ -149,7 +150,7 @@ export default function Home() {
             <li><Check width={15} height={15} /> Runs in your browser</li>
           </ul>
         </div>
-        <ChatPreview />
+        <Portrait />
       </section>
 
       {/* features */}

@@ -32,5 +32,13 @@ export const CHAT_URL = "http://localhost:5173";
 /** The marketing/landing site URL. The companion gate links back here. */
 export const SITE_URL = "http://localhost:5180";
 
+/**
+ * Public backend base URL (FastAPI). Leave "" for local dev (same-origin /ws via
+ * the Vite proxy). For a deployed chat app + remote/tunnelled backend, set the
+ * public URL, e.g. "https://kanee-api.trycloudflare.com". The WebSocket URL is
+ * derived from it (https→wss). Runtime override: append ?api=<url> to the app.
+ */
+export const BACKEND_URL = "";
+
 /** How users without beta access reach you to request it (shown in the UI). */
 export const BETA_CONTACT = "ariaakane2@gmail.com";
