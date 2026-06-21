@@ -3,8 +3,8 @@
     {
       "target": "landing",
       "public": "landing/dist",
-      "cleanUrls": true,
       "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+      "rewrites": [{ "source": "**", "destination": "/index.html" }],
       "headers": [
         {
           "source": "**/*.@(js|css|woff2)",

@@ -1,13 +1,18 @@
 {
   "projects": {
-    "default": "YOUR_PROJECT_ID"
+    "default": "project-kanee-companion"
   },
   "targets": {
-    "YOUR_PROJECT_ID": {
+    "project-kanee-companion": {
       "hosting": {
-        "landing": ["YOUR_LANDING_SITE_ID"],
-        "app": ["YOUR_APP_SITE_ID"]
+        "landing": [
+          "kanee-landing"
+        ],
+        "app": [
+          "kanee-app"
+        ]
       }
     }
-  }
+  },
+  "etags": {}
 }

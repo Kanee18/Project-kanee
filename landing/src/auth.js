@@ -1,41 +1,25 @@
 /**
- * Firebase auth + the user's beta-access record.
+ * Auth helpers + the user's beta-access record.
  *
- * Account model (Firestore):
- *   users/{uid} = { email, displayName, betaAccess: bool, plan, createdAt }
- *
- * Beta access is granted MANUALLY: you flip `betaAccess` to true in the
- * Firestore console for approved users. New accounts start false. The client
- * can read its own doc but security rules forbid it writing `betaAccess`
- * (see SETUP.md), so this gate can't be bypassed from the browser.
+ * Account model (Firestore): users/{uid} = { email, displayName, betaAccess,
+ * plan, createdAt }. Beta access is granted MANUALLY in the Firestore console;
+ * security rules forbid the client writing `betaAccess`, so the gate is safe.
  */
-import { initializeApp } from "firebase/app";
 import {
-  getAuth,
   GoogleAuthProvider,
   signInWithPopup,
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   updateProfile,
   signOut,
-  onAuthStateChanged,
 } from "firebase/auth";
-import {
-  getFirestore,
-  doc,
-  getDoc,
-  setDoc,
-  serverTimestamp,
-} from "firebase/firestore";
-import { firebaseConfig } from "../../shared/firebase-config.js";
+import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
+import { auth, db } from "./firebase.js";
 
-const app = initializeApp(firebaseConfig);
-export const auth = getAuth(app);
-export const db = getFirestore(app);
 const googleProvider = new GoogleAuthProvider();
 
-/** Create the users/{uid} doc on first sign-in; return the stored profile. */
-async function ensureUserDoc(user) {
+/** Create users/{uid} on first sign-in; return the stored profile. */
+export async function ensureUserDoc(user) {
   const ref = doc(db, "users", user.uid);
   const snap = await getDoc(ref);
   if (snap.exists()) return snap.data();
@@ -50,25 +34,7 @@ async function ensureUserDoc(user) {
   return profile;
 }
 
-/**
- * Subscribe to auth changes. The callback receives:
- *   { user, profile }  — profile is the Firestore doc (has betaAccess), or
- *   { user: null, profile: null } when signed out.
- */
-export function watchAuth(cb) {
-  return onAuthStateChanged(auth, async (user) => {
-    if (!user) return cb({ user: null, profile: null });
-    let profile = null;
-    try {
-      profile = await ensureUserDoc(user);
-    } catch (err) {
-      console.warn("could not load profile:", err);
-    }
-    cb({ user, profile });
-  });
-}
-
-/** Re-read the signed-in user's Firestore doc (e.g. to check for fresh access). */
+/** Re-read the signed-in user's doc (e.g. to check for freshly granted access). */
 export async function refreshProfile() {
   const user = auth.currentUser;
   if (!user) return null;
@@ -100,10 +66,9 @@ export function logout() {
   return signOut(auth);
 }
 
-/** Turn a Firebase error code into a short, human message for a toast. */
+/** Turn a Firebase error code into a short, human message. */
 export function authErrorMessage(err) {
-  const code = err?.code || "";
-  switch (code) {
+  switch (err?.code || "") {
     case "auth/invalid-email":
       return "That email address doesn't look right.";
     case "auth/missing-password":
