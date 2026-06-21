@@ -1,78 +1,133 @@
 /**
- * Chat log, state indicator, connection badge, error toasts.
+ * Visual-novel dialogue box, state chip, connection chip, error toasts.
  * Pure DOM — no protocol or audio logic here.
+ *
+ * The box shows the CURRENT speaker's line: the user's message while she
+ * thinks, then her reply (segments accumulate into one line). It's not a
+ * scrolling transcript — that's the VN look the user asked for.
  */
 export class UI {
   constructor() {
-    this._log = document.getElementById("log");
     this._state = document.getElementById("state");
     this._conn = document.getElementById("conn");
     this._toasts = document.getElementById("toasts");
-    this._assistantBubble = null;
-    this._characterName = document.querySelector("header h1")?.textContent || "Kanee";
+    this._name = document.getElementById("nameplate");
+    this._text = document.getElementById("dialogue-text");
+    this._characterName = this._name?.dataset.name || "Kanee";
+    this._speaker = null;     // "user" | "kanee"
+    this._freshReply = false; // next segment starts a new Kanee line
+
+    // Conversation backlog (the VN "history" panel).
+    this._history = [];       // [{ kind, label, text }] — one entry per line
+    this._current = null;     // the entry currently being appended to
+    this._backlog = document.getElementById("backlog");
+    this._backlogList = document.getElementById("backlog-list");
+    this._backlogOpen = false;
+    document.getElementById("history-toggle")?.addEventListener("click", () => this.openBacklog());
+    document.getElementById("backlog-close")?.addEventListener("click", () => this.closeBacklog());
+    this._backlog?.addEventListener("click", (e) => {
+      if (e.target === this._backlog) this.closeBacklog(); // click the dim backdrop
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && this._backlogOpen) this.closeBacklog();
+    });
   }
 
-  /** Stream-chat row: colored name + message. Voice gets a mic mark. */
-  addUserMessage(text, { voice = false } = {}) {
-    const row = this._makeRow("user", "You");
-    if (voice) {
-      const mark = document.createElement("span");
-      mark.className = "mic-mark";
-      mark.title = "Voice message";
-      // Inline mic icon (matches the footer talk button); static markup, no input.
-      mark.innerHTML =
-        '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" ' +
-        'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-        '<rect x="9" y="2" width="6" height="12" rx="3"/>' +
-        '<path d="M5 10a7 7 0 0 0 14 0"/>' +
-        '<line x1="12" y1="19" x2="12" y2="22"/></svg>';
-      row.appendChild(mark);
+  _setSpeaker(label, kind) {
+    this._speaker = kind;
+    if (this._name) {
+      this._name.textContent = label;
+      this._name.className = kind === "user" ? "user" : "";
     }
-    row.appendChild(document.createTextNode(text));
-    this._scroll();
   }
 
-  /** The next segment starts a fresh assistant row. */
+  /** Show the user's line (their message, or a voice transcript). */
+  addUserMessage(text) {
+    this._setSpeaker("You", "user");
+    this._text.textContent = text;
+    this._freshReply = false;
+    this._current = { kind: "user", label: "You", text };
+    this._pushHistory(this._current);
+    this._reveal();
+  }
+
+  /** The next segment starts a fresh Kanee line. */
   newReply() {
-    this._assistantBubble = null;
+    this._freshReply = true;
   }
 
-  /** Append one segment to the current assistant row (reply streams in). */
-  addSegment({ text, emotion, gesture }) {
-    if (this._assistantBubble === null) {
-      this._assistantBubble = this._makeRow("kanee", this._characterName);
+  /** Append one segment to Kanee's current line (her reply streams in). */
+  addSegment({ text }) {
+    if (this._freshReply || this._speaker !== "kanee") {
+      this._setSpeaker(this._characterName, "kanee");
+      this._text.textContent = "";
+      this._freshReply = false;
+      this._current = { kind: "kanee", label: this._characterName, text: "" };
+      this._pushHistory(this._current);
     }
-    const seg = document.createElement("span");
-    seg.className = "seg";
-    const tags = document.createElement("span");
-    tags.className = "seg-tags";
-    tags.textContent = `[${emotion}]` + (gesture ? `[${gesture}]` : "");
-    seg.appendChild(tags);
-    seg.appendChild(document.createTextNode(text));
-    this._assistantBubble.appendChild(seg);
-    this._scroll();
+    this._text.textContent += (this._text.textContent ? " " : "") + text;
+    if (this._current) this._current.text += (this._current.text ? " " : "") + text;
+    if (this._backlogOpen) this._renderBacklog(); // keep an open panel live
+    this._reveal();
   }
 
-  _makeRow(kind, name) {
-    const row = document.createElement("div");
-    row.className = `msg ${kind}`;
-    const nameEl = document.createElement("span");
-    nameEl.className = "name";
-    nameEl.textContent = name;
-    row.appendChild(nameEl);
-    this._log.appendChild(row);
-    if (kind === "kanee") this._assistantBubble = row;
-    return row;
+  // -- history / backlog -------------------------------------------------------
+
+  _pushHistory(entry) {
+    this._history.push(entry);
+    if (this._history.length > 200) this._history.shift(); // cap memory
+  }
+
+  openBacklog() {
+    this._renderBacklog();
+    this._backlog.hidden = false;
+    this._backlogOpen = true;
+  }
+
+  closeBacklog() {
+    this._backlog.hidden = true;
+    this._backlogOpen = false;
+  }
+
+  _renderBacklog() {
+    this._backlogList.replaceChildren();
+    if (this._history.length === 0) {
+      const p = document.createElement("p");
+      p.className = "backlog-empty";
+      p.textContent = "No conversation yet.";
+      this._backlogList.appendChild(p);
+      return;
+    }
+    for (const entry of this._history) {
+      const row = document.createElement("div");
+      row.className = `backlog-row ${entry.kind}`;
+      const name = document.createElement("span");
+      name.className = "backlog-name";
+      name.textContent = entry.label;
+      const body = document.createElement("span");
+      body.className = "backlog-body";
+      body.textContent = entry.text;
+      row.append(name, body);
+      this._backlogList.appendChild(row);
+    }
+    this._backlogList.scrollTop = this._backlogList.scrollHeight;
+  }
+
+  _reveal() {
+    this._text.classList.remove("seg-in");
+    void this._text.offsetWidth; // restart the subtle fade-in
+    this._text.classList.add("seg-in");
+    this._text.scrollTop = this._text.scrollHeight;
   }
 
   setState(value) {
     this._state.textContent = value;
-    this._state.className = value;
+    this._state.className = `chip ${value}`;
   }
 
   setConnected(ok) {
-    this._conn.textContent = ok ? "connected" : "reconnecting…";
-    this._conn.className = ok ? "ok" : "";
+    this._conn.textContent = ok ? "online" : "offline";
+    this._conn.className = ok ? "chip ok" : "chip";
   }
 
   /** Error toast with a plain-language message; auto-dismisses. */
@@ -83,9 +138,5 @@ export class UI {
     div.onclick = () => div.remove();
     this._toasts.appendChild(div);
     setTimeout(() => div.remove(), 8000);
-  }
-
-  _scroll() {
-    this._log.scrollTop = this._log.scrollHeight;
   }
 }

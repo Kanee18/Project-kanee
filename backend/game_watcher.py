@@ -129,7 +129,6 @@ class GameWatcher:
         self._task: Optional[asyncio.Task] = None
         self._running: set[str] = set()           # games running as of last poll
         self._started_at: dict[str, float] = {}    # game -> monotonic launch time
-        self._primed = False                       # first poll seeds state silently
         self._next_ambient = 0.0
 
     def start(self) -> None:
@@ -154,20 +153,16 @@ class GameWatcher:
             try:
                 running, active = await loop.run_in_executor(None, detect_games)
                 now = time.monotonic()
-                if not self._primed:
-                    # Don't announce games already running when we connect.
-                    self._primed = True
-                    self._running = running
-                    self._started_at = {g: now for g in running}
-                else:
-                    for game in running - self._running:    # just launched
-                        self._started_at[game] = now
-                        self._fire("start", game, None)
-                        self._next_ambient = now + random.uniform(AMBIENT_MIN, AMBIENT_MAX)
-                    for game in self._running - running:     # just closed
-                        minutes = (now - self._started_at.pop(game, now)) / 60.0
-                        self._fire("stop", game, minutes)
-                    self._running = running
+                # First poll has an empty _running, so a game already open when
+                # you connect is announced too (not silently ignored).
+                for game in running - self._running:    # just launched / already up
+                    self._started_at[game] = now
+                    self._fire("start", game, None)
+                    self._next_ambient = now + random.uniform(AMBIENT_MIN, AMBIENT_MAX)
+                for game in self._running - running:     # just closed
+                    minutes = (now - self._started_at.pop(game, now)) / 60.0
+                    self._fire("stop", game, minutes)
+                self._running = running
                 # "still playing" only while the game is actually in front
                 if active and now >= self._next_ambient:
                     self._fire("ambient", active, None)

@@ -166,6 +166,7 @@ class Session:
         """Proactively comment on the game the user is playing (no thinking
         state, no math)."""
         cue = self._game_cue(kind, game, minutes)
+        logger.info("game comment: %s %s -> asking LLM to react", kind, game)
         async with self.pipe.reply_lock:
             t0 = time.perf_counter()
             await self._stream_segments(self.pipe.llm.stream_comment(cue), t0)
