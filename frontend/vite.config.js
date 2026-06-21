@@ -6,7 +6,16 @@ import { defineConfig } from "vite";
 //   origin-relative (no hardcoded backend URL).
 export default defineConfig({
   publicDir: "../assets",
+  build: {
+    // es2022 so the entry can use a top-level await for the access gate.
+    target: "es2022",
+    // The 3D bundle (Three.js + VRM) is a single lazy chunk loaded after the
+    // gate; ~850 kB is expected, so quiet the default 500 kB warning.
+    chunkSizeWarningLimit: 1000,
+  },
   server: {
+    // allow importing the shared Firebase config from ../shared
+    fs: { allow: [".."] },
     proxy: {
       "/ws": {
         target: "ws://127.0.0.1:8000",

@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kanee — your 3D anime AI companion</title>
+  <meta name="description" content="Kanee is an expressive 3D anime AI companion you can talk to by voice or text. Now in private beta." />
+</head>
+<body>
+  <!-- ───────────────────────── nav ───────────────────────── -->
+  <header id="nav">
+    <a class="brand" href="#home">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M12 21s-7-4.6-9.3-9C1 8.7 2.6 5.5 5.8 5.5c1.9 0 3.3 1.1 4.2 2.6.9-1.5 2.3-2.6 4.2-2.6 3.2 0 4.8 3.2 3.1 6.5C19 16.4 12 21 12 21z" fill="currentColor"/></svg>
+      </span>
+      <span>Kanee</span>
+    </a>
+    <nav class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#pricing">Pricing</a>
+      <a href="#faq">FAQ</a>
+      <a href="#beta">Beta</a>
+    </nav>
+    <div class="nav-auth" id="nav-auth">
+      <!-- Signed-out view -->
+      <div class="auth-out" data-auth="out">
+        <button class="btn ghost" data-action="login">Log in</button>
+        <button class="btn solid" data-action="signup">Get started</button>
+      </div>
+      <!-- Signed-in view -->
+      <div class="auth-in" data-auth="in" hidden>
+        <span class="badge" id="access-badge">checking…</span>
+        <div class="account" id="account-menu">
+          <button class="account-btn" id="account-btn">
+            <span class="avatar" id="account-avatar">K</span>
+            <span class="account-email" id="account-email"></span>
+            <svg class="chev" viewBox="0 0 24 24" fill="none"><path d="M6 9l6 6 6-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+          <div class="account-pop" id="account-pop" hidden>
+            <a class="pop-item" href="/account.html">My account</a>
+            <button class="pop-item" data-action="open-chat">Open chat</button>
+            <button class="pop-item danger" data-action="logout">Log out</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- ───────────────────────── hero ───────────────────────── -->
+    <section id="home" class="hero">
+      <div class="hero-copy">
+        <span class="kicker"><span class="dot"></span> Private beta</span>
+        <h1>Meet <span class="grad">Kanee</span> — a 3D anime companion who actually feels alive.</h1>
+        <p class="lead">
+          Talk by voice or type — Kanee replies in a real synthesized voice while her
+          avatar lip-syncs, emotes, and reacts. She remembers you, has moods, and even
+          notices when you fire up a game.
+        </p>
+        <div class="hero-cta" id="hero-cta">
+          <!-- swapped by JS depending on auth/beta state -->
+          <button class="btn solid lg" data-action="signup">Request beta access</button>
+          <a class="btn ghost lg" href="#features">See what she does</a>
+        </div>
+        <p class="hero-note" id="hero-note">Free while in beta · no card required</p>
+      </div>
+      <div class="hero-art" aria-hidden="true">
+        <div class="orb"></div>
+        <div class="card-float">
+          <div class="cf-name">Kanee</div>
+          <div class="cf-line">Oh, it's you. ...What, I wasn't waiting or anything.</div>
+          <div class="cf-tags"><span>shy</span><span>fidget</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────────────────────── features ───────────────────────── -->
+    <section id="features" class="section">
+      <div class="section-head">
+        <h2>Not a chatbot in a box.</h2>
+        <p>Every reply drives a live 3D performance — voice, face, and body in sync.</p>
+      </div>
+      <div class="grid features">
+        <article class="feat">
+          <div class="feat-ico">🎙️</div>
+          <h3>Real voice, low latency</h3>
+          <p>She starts speaking within seconds — replies stream sentence-by-sentence with a synthesized English voice.</p>
+        </article>
+        <article class="feat">
+          <div class="feat-ico">💃</div>
+          <h3>Expressive animation</h3>
+          <p>Lip-sync, emotion crossfades, gesture clips, and procedural body language. She bounces, tilts, pouts, and leans in.</p>
+        </article>
+        <article class="feat">
+          <div class="feat-ico">🧠</div>
+          <h3>Remembers you</h3>
+          <p>Long-term memory of the things that matter to you, carried across conversations — not just the current chat.</p>
+        </article>
+        <article class="feat">
+          <div class="feat-ico">🎮</div>
+          <h3>Game-aware</h3>
+          <p>Notices when you launch a game and reacts — cheering you on, teasing, or welcoming you back when you're done.</p>
+        </article>
+        <article class="feat">
+          <div class="feat-ico">🗣️</div>
+          <h3>Voice or text</h3>
+          <p>Hold to talk, or just type. Both are first-class — pick whatever fits the moment.</p>
+        </article>
+        <article class="feat">
+          <div class="feat-ico">💗</div>
+          <h3>A real personality</h3>
+          <p>Playful, caring, a little tsundere. She teases, sulks, and lights up — moods that shift with the conversation.</p>
+        </article>
+      </div>
+    </section>
+
+    <!-- ───────────────────────── pricing ───────────────────────── -->
+    <section id="pricing" class="section alt">
+      <div class="section-head">
+        <h2>Simple pricing</h2>
+        <p>Everything is free during the beta. Paid plans go live at launch.</p>
+      </div>
+      <div class="grid pricing">
+        <article class="plan">
+          <div class="plan-name">Beta</div>
+          <div class="plan-price"><span class="amt">Free</span></div>
+          <p class="plan-sub">While we're in private beta</p>
+          <ul class="plan-feats">
+            <li>Full voice + text chat</li>
+            <li>Expressive 3D avatar</li>
+            <li>Long-term memory</li>
+            <li>Game-aware reactions</li>
+          </ul>
+          <button class="btn solid full" data-action="signup">Request access</button>
+        </article>
+        <article class="plan featured">
+          <div class="plan-flag">At launch</div>
+          <div class="plan-name">Pro</div>
+          <div class="plan-price"><span class="amt">$9</span><span class="per">/mo</span></div>
+          <p class="plan-sub">For everyday companionship</p>
+          <ul class="plan-feats">
+            <li>Everything in Beta</li>
+            <li>Priority voice latency</li>
+            <li>Outfit &amp; emote packs</li>
+            <li>Longer memory horizon</li>
+          </ul>
+          <button class="btn ghost full" disabled>Coming soon</button>
+        </article>
+        <article class="plan">
+          <div class="plan-name">Supporter</div>
+          <div class="plan-price"><span class="amt">$19</span><span class="per">/mo</span></div>
+          <p class="plan-sub">Back the project, get extras</p>
+          <ul class="plan-feats">
+            <li>Everything in Pro</li>
+            <li>Early access to new features</li>
+            <li>Custom voice options</li>
+            <li>Direct line to the dev</li>
+          </ul>
+          <button class="btn ghost full" disabled>Coming soon</button>
+        </article>
+      </div>
+    </section>
+
+    <!-- ───────────────────────── faq ───────────────────────── -->
+    <section id="faq" class="section">
+      <div class="section-head">
+        <h2>FAQ</h2>
+      </div>
+      <div class="faq-list">
+        <details>
+          <summary>What is Kanee, exactly?</summary>
+          <p>A 3D anime AI companion that runs in your browser. You talk to her by voice or text and she replies out loud while her avatar animates in real time.</p>
+        </details>
+        <details>
+          <summary>How do I get in during the beta?</summary>
+          <p>Create an account, then contact us to request access. Once you're approved, the "Start chat with Kanee" button unlocks on your account.</p>
+        </details>
+        <details>
+          <summary>Does it cost anything right now?</summary>
+          <p>No — the beta is completely free. Paid monthly plans only go live at launch, and beta testers will get a heads-up first.</p>
+        </details>
+        <details>
+          <summary>Do I need a powerful PC?</summary>
+          <p>The avatar renders in your browser, so a reasonably modern machine with a decent GPU gives the smoothest experience. It still works without one, just less buttery.</p>
+        </details>
+        <details>
+          <summary>Is my data private?</summary>
+          <p>Your account is managed through Firebase. Conversations power Kanee's memory so she can remember you between chats. We don't sell your data.</p>
+        </details>
+      </div>
+    </section>
+
+    <!-- ───────────────────────── beta / contact ───────────────────────── -->
+    <section id="beta" class="section alt beta-cta">
+      <div class="beta-box">
+        <h2>Want in on the beta?</h2>
+        <p>
+          Kanee is in private testing while we polish her. Make an account, then reach out
+          and we'll grant your access by hand.
+        </p>
+        <div class="beta-actions">
+          <button class="btn solid lg" data-action="signup" id="beta-signup">Create your account</button>
+          <a class="btn ghost lg" id="beta-contact" href="#">Contact for access</a>
+        </div>
+        <p class="beta-small" id="beta-status"></p>
+      </div>
+    </section>
+  </main>
+
+  <footer id="footer">
+    <span>© <span id="year"></span> Kanee</span>
+    <span class="foot-dot">·</span>
+    <span>An expressive AI companion · private beta</span>
+    <span class="foot-dot">·</span>
+    <a href="/terms.html">Terms</a>
+    <span class="foot-dot">·</span>
+    <a href="/privacy.html">Privacy</a>
+  </footer>
+
+  <!-- ───────────────────────── auth dialog ───────────────────────── -->
+  <dialog id="auth-dialog">
+    <form method="dialog" class="auth-card" id="auth-form">
+      <button class="auth-close" type="button" data-action="close-auth" aria-label="Close">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
+      <div class="auth-tabs">
+        <button type="button" class="auth-tab active" data-tab="login">Log in</button>
+        <button type="button" class="auth-tab" data-tab="signup">Sign up</button>
+      </div>
+
+      <button type="button" class="btn google" data-action="google">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path fill="#EA4335" d="M12 10.2v3.9h5.5c-.24 1.4-1.7 4.1-5.5 4.1-3.3 0-6-2.7-6-6.1s2.7-6.1 6-6.1c1.9 0 3.1.8 3.8 1.5l2.6-2.5C16.9 2.9 14.7 2 12 2 6.9 2 2.8 6.1 2.8 11.2S6.9 20.3 12 20.3c5.6 0 9.3-3.9 9.3-9.4 0-.6-.06-1.1-.15-1.6H12z"/></svg>
+        Continue with Google
+      </button>
+
+      <div class="auth-or"><span>or</span></div>
+
+      <label class="field" data-only="signup" hidden>
+        <span>Name</span>
+        <input type="text" id="auth-name" autocomplete="name" placeholder="What should Kanee call you?" />
+      </label>
+      <label class="field">
+        <span>Email</span>
+        <input type="email" id="auth-email" autocomplete="email" placeholder="you@example.com" required />
+      </label>
+      <label class="field">
+        <span>Password</span>
+        <input type="password" id="auth-password" autocomplete="current-password" placeholder="••••••••" required />
+      </label>
+
+      <button type="submit" class="btn solid full" id="auth-submit">Log in</button>
+      <p class="auth-foot" id="auth-foot"></p>
+    </form>
+  </dialog>
+
+  <div id="toasts"></div>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

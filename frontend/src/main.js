@@ -25,6 +25,10 @@ import { Hologram } from "./hologram.js";
 import { Sidebar } from "./sidebar.js";
 import { DebugOverlay } from "./debug.js"; // temporary — Step 2 diagnosis
 
+// This module is loaded by entry.js only AFTER the access gate resolves, so
+// Three.js + VRM (the heavy chunk) never download for visitors stuck at the
+// gate. See entry.js.
+
 // Outfits = whole VRM swaps. "Default" is always shown; the rest appear only
 // if their file exists under assets/outfits/. Add entries here for more.
 const OUTFITS = [
@@ -604,7 +608,8 @@ async function initAvatar(ui) {
 
 const ui = new UI();
 const ws = new WSClient();
-const debug = new DebugOverlay();
+// Diagnostic overlay (F8) is dev-only — it never appears in the built/beta app.
+const debug = import.meta.env.DEV ? new DebugOverlay() : { attach() {}, update() {} };
 
 // Customization sidebar: outfit swap + emote picker (wired to the avatar below).
 let setOutfit = async () => {}; // assigned once the avatar pipeline initializes

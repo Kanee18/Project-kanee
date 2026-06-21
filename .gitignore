@@ -12,6 +12,13 @@ __pycache__/
 # node
 node_modules/
 frontend/dist/
+landing/dist/
+
+# firebase hosting cache
+.firebase/
+
+# firebase project config (copy shared/firebase-config.example.js → firebase-config.js)
+shared/firebase-config.js
 
 # generated audio
 *.gen.wav

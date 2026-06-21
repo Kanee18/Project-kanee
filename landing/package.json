@@ -1,5 +1,5 @@
 {
-  "name": "kanee-frontend",
+  "name": "kanee-landing",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -12,9 +12,6 @@
     "vite": "^6.0.0"
   },
   "dependencies": {
-    "@pixiv/three-vrm": "^3.5.3",
-    "@pixiv/three-vrm-animation": "^3.5.3",
-    "firebase": "^12.15.0",
-    "three": "^0.184.0"
+    "firebase": "^11.0.0"
   }
 }

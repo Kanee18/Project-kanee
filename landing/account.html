@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Your account · Kanee</title>
+</head>
+<body>
+  <header id="nav">
+    <a class="brand" href="/">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M12 21s-7-4.6-9.3-9C1 8.7 2.6 5.5 5.8 5.5c1.9 0 3.3 1.1 4.2 2.6.9-1.5 2.3-2.6 4.2-2.6 3.2 0 4.8 3.2 3.1 6.5C19 16.4 12 21 12 21z" fill="currentColor"/></svg>
+      </span>
+      <span>Kanee</span>
+    </a>
+    <nav class="nav-links">
+      <a href="/#features">Features</a>
+      <a href="/#pricing">Pricing</a>
+      <a href="/#faq">FAQ</a>
+    </nav>
+    <div class="nav-auth">
+      <button class="btn ghost" id="nav-logout">Log out</button>
+    </div>
+  </header>
+
+  <main class="dash-wrap">
+    <div class="dash" id="dash">
+      <div class="kgate-spin" style="margin:3rem auto"></div>
+    </div>
+  </main>
+
+  <div id="toasts"></div>
+  <script type="module" src="/src/account.js"></script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "projects": {
+    "default": "YOUR_PROJECT_ID"
+  },
+  "targets": {
+    "YOUR_PROJECT_ID": {
+      "hosting": {
+        "landing": ["YOUR_LANDING_SITE_ID"],
+        "app": ["YOUR_APP_SITE_ID"]
+      }
+    }
+  }
+}
