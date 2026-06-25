@@ -28,6 +28,57 @@ body {
 button { font: inherit; cursor: pointer; border: none; }
 button svg { width: 1.2em; height: 1.2em; display: block; flex: none; }
 
+/* ---- title screen (cinematic — live character shows through) ------- */
+#titlescreen { position: fixed; inset: 0; z-index: 30; transition: opacity 0.6s ease; }
+#titlescreen.hidden { opacity: 0; pointer-events: none; }
+/* darken the edges (frame the character) + anchor the menu over a bottom scrim */
+.ts-vignette {
+  position: absolute; inset: 0;
+  background: radial-gradient(135% 100% at 50% 34%, transparent 38%, rgba(5, 4, 10, 0.82) 100%);
+}
+.ts-scrim {
+  position: absolute; inset: 0;
+  background: linear-gradient(to top, rgba(5, 4, 10, 0.95), rgba(5, 4, 10, 0.45) 26%, transparent 52%);
+}
+.ts-content {
+  position: absolute; left: 0; right: 0; bottom: clamp(9%, 13vh, 17%);
+  display: flex; flex-direction: column; align-items: center; text-align: center;
+  padding: 0 1.5rem; animation: ts-rise 0.7s ease-out;
+}
+.ts-kicker {
+  font-size: 0.72rem; letter-spacing: 0.42em; text-transform: uppercase;
+  color: var(--rose); opacity: 0.9; margin-bottom: 0.7rem; padding-left: 0.42em;
+}
+.ts-name {
+  margin: 0; font-size: clamp(3rem, 11vw, 6rem); font-weight: 800; letter-spacing: -0.02em;
+  color: #fdf3f7; text-shadow: 0 2px 44px rgba(232, 127, 166, 0.45);
+}
+.ts-tag { margin-top: 0.4rem; color: var(--muted); font-size: clamp(0.9rem, 2.5vw, 1.05rem); letter-spacing: 0.04em; }
+.ts-start {
+  margin-top: 2rem; display: inline-flex; align-items: center; gap: 0.6rem; font: inherit;
+  font-weight: 700; letter-spacing: 0.18em; text-transform: uppercase; font-size: 0.92rem; color: #fff;
+  cursor: pointer; padding: 0.85rem 2.4rem; border-radius: 999px;
+  border: 1px solid rgba(232, 127, 166, 0.55); background: rgba(232, 127, 166, 0.12);
+  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+  transition: transform 0.12s ease, background 0.2s, border-color 0.2s, box-shadow 0.25s;
+}
+.ts-start svg { width: 16px; height: 16px; }
+.ts-start:hover { background: rgba(232, 127, 166, 0.22); border-color: var(--rose); box-shadow: 0 0 36px rgba(232, 127, 166, 0.45); }
+.ts-start:active { transform: translateY(2px); }
+.ts-start[disabled] { opacity: 0.6; cursor: progress; }
+.ts-hint {
+  margin-top: 1.1rem; font-size: 0.72rem; letter-spacing: 0.34em; text-transform: uppercase;
+  color: var(--muted); animation: ts-blink 2.6s ease-in-out infinite;
+}
+@keyframes ts-rise { from { opacity: 0; transform: translateY(18px); } }
+@keyframes ts-blink { 0%, 100% { opacity: 0.3; } 50% { opacity: 0.72; } }
+
+/* hide the chat chrome until Start is pressed (so it doesn't show through) */
+#topbar, #dialogue { transition: opacity 0.5s ease; }
+body.pre-start #topbar,
+body.pre-start #dialogue,
+body.pre-start #sidebar { opacity: 0; pointer-events: none; }
+
 /* ---- the scene fills the whole window (it IS the background) -------- */
 #viewport {
   position: fixed;

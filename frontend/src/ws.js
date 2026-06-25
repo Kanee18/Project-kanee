@@ -8,14 +8,16 @@
  * socket is down so the caller can surface it instead of silently dropping.
  */
 import { BACKEND_URL } from "../../shared/firebase-config.js";
+import { getRuntimeBackend } from "./backend.js";
+import { auth } from "./auth.js";
 
 /**
  * Where to open the WebSocket. Priority:
- *   1. ?api=<url> query param (persisted) — point a deployed app at a changing
- *      tunnel URL without rebuilding.
+ *   1. ?api=<url> query param (persisted) — manual override for debugging.
  *   2. localStorage "kanee_backend" (set by #1 on a previous visit).
- *   3. BACKEND_URL from the shared config (a deployed/remote backend).
- *   4. same-origin /ws — local dev, where Vite proxies /ws to the backend.
+ *   3. runtime URL from Firestore (published by the tunnel script).
+ *   4. BACKEND_URL from the shared config (a fixed/named backend).
+ *   5. same-origin /ws — local dev, where Vite proxies /ws to the backend.
  * A base URL (http/https) is converted to ws/wss and gets "/ws" appended.
  */
 function resolveWsUrl() {
@@ -31,6 +33,7 @@ function resolveWsUrl() {
   } catch {
     /* ignore */
   }
+  if (!base) base = getRuntimeBackend();
   if (!base) base = BACKEND_URL || "";
   if (base) {
     return base.trim().replace(/^http/i, "ws").replace(/\/+$/, "") + "/ws";
@@ -73,12 +76,28 @@ export class WSClient {
     const ws = new WebSocket(resolveWsUrl());
     this._ws = ws;
 
-    ws.onopen = () => {
+    ws.onopen = async () => {
+      // Auth handshake first: the backend expects {type:"auth", token} before
+      // anything else (verified there only when backend auth is enabled).
+      let token = null;
+      try {
+        token = (await auth.currentUser?.getIdToken()) || null;
+      } catch {
+        /* no session / dev bypass — send null, backend decides */
+      }
+      try {
+        ws.send(JSON.stringify({ type: "auth", token }));
+      } catch {
+        /* socket closed underneath us */
+      }
       this._delay = 1000;
       this._connListeners.forEach((fn) => fn(true));
     };
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       this._connListeners.forEach((fn) => fn(false));
+      // 4401/4403 = auth rejected (not signed in / no beta access). Don't hammer
+      // the server reconnecting — the error toast already explains it.
+      if (ev && (ev.code === 4401 || ev.code === 4403)) return;
       setTimeout(() => this._connect(), this._delay);
       this._delay = Math.min(this._delay * 1.7, 8000);
     };

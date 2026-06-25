@@ -41,6 +41,71 @@ logger = logging.getLogger("main")
 
 _BACKEND_DIR = Path(__file__).resolve().parent
 
+# --- optional Firebase auth (protects the public/tunnelled backend) ----------
+# Drop a Firebase service-account JSON at backend/serviceAccount.json to require
+# a valid Firebase ID token from a beta-approved account on every WS connect.
+# Without the file, auth is OFF and the socket is open (fine for local dev).
+_SA_PATH = _BACKEND_DIR / "serviceAccount.json"
+_AUTH_ENABLED = False
+_fb_auth = None
+_fb_fs = None
+if _SA_PATH.exists():
+    try:
+        import firebase_admin
+        from firebase_admin import auth as _fb_auth_mod
+        from firebase_admin import credentials
+        from firebase_admin import firestore as _fb_fs_mod
+
+        firebase_admin.initialize_app(credentials.Certificate(str(_SA_PATH)))
+        _fb_auth = _fb_auth_mod
+        _fb_fs = _fb_fs_mod.client()
+        _AUTH_ENABLED = True
+        logger.info("backend auth: ON — Firebase token + beta access required")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("backend auth init failed (%s) — running OPEN", exc)
+else:
+    logger.warning("backend auth: OFF (no serviceAccount.json) — WS is open")
+
+
+async def _authenticate(ws: WebSocket) -> bool:
+    """Consume the client's first message (the auth handshake). When auth is
+    enabled, require a valid Firebase ID token from a beta-approved account."""
+    try:
+        msg = json.loads(await ws.receive_text())
+    except Exception:
+        await ws.close(code=4401)
+        return False
+
+    if not _AUTH_ENABLED:
+        return True  # local/dev mode — any token is ignored
+
+    async def _reject(message: str, code: int) -> bool:
+        try:
+            await ws.send_text(json.dumps({"type": "error", "message": message}))
+            await ws.close(code=code)
+        except Exception:
+            pass
+        return False
+
+    token = msg.get("token") if isinstance(msg, dict) else None
+    if not isinstance(msg, dict) or msg.get("type") != "auth" or not token:
+        return await _reject("Sign-in required to chat.", 4401)
+    try:
+        decoded = await asyncio.to_thread(_fb_auth.verify_id_token, token)
+    except Exception:
+        return await _reject("Your session is invalid — please sign in again.", 4401)
+
+    uid = decoded.get("uid")
+    try:
+        snap = await asyncio.to_thread(lambda: _fb_fs.collection("users").document(uid).get())
+        if not (snap.exists and (snap.to_dict() or {}).get("betaAccess") is True):
+            return await _reject("Your account doesn't have beta access yet.", 4403)
+    except Exception as exc:  # noqa: BLE001
+        # Token was valid; don't lock the user out over a transient Firestore error.
+        logger.warning("beta-access check failed for %s: %s", uid, exc)
+    logger.info("ws authenticated: %s", uid)
+    return True
+
 
 class Pipeline:
     """Shared clients + a lock that serializes replies (history is shared)."""
@@ -270,6 +335,9 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
     session = Session(websocket, websocket.app.state.pipeline)
     logger.info("websocket connected")
+    if not await _authenticate(websocket):
+        logger.info("websocket rejected (auth)")
+        return
     # Watch for games in the foreground and let her comment proactively.
     watcher = GameWatcher(session.maybe_comment)
     watcher.start()

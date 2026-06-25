@@ -216,6 +216,7 @@ export class MotionController {
     // the eyes (e.g. a happy ^_^ smile). Scales the auto-blink down so she
     // doesn't "blink" eyes the expression has already shut.
     this.blinkSuppress = 0;
+    this.emotionLid = 0; // 0..1 held half-lid from the active emotion (smug/shy/sad)
 
     // head-follow: main.js sets the target yaw (rad) toward the orbit camera.
     this.headFollowTarget = 0;
@@ -531,7 +532,7 @@ export class MotionController {
     }
     // Scale the blink down when the emotion already closes the eyes — no
     // blinking on an already-shut ^_^ smile.
-    em.setValue("blink", Math.max(lid, squint, lidFollow) * (1 - this.blinkSuppress));
+    em.setValue("blink", Math.max(lid, squint, lidFollow, this.emotionLid) * (1 - this.blinkSuppress));
   }
 
   // -- look-at ---------------------------------------------------------------------------
@@ -544,11 +545,17 @@ export class MotionController {
     const mode =
       this._state === "thinking" ? "think"
       : this._emotion === "shy" ? "shy"
+      : this._emotion === "sad" ? "sad"
+      : this._emotion === "smug" ? "smug"
       : this._state === "idle" && this._talk < 0.15 ? "wander"
       : "none";
 
     if (mode === "think") {
       this._gazeWant.set(0.45, 0.4, 0); // up-left from her point of view
+    } else if (mode === "sad") {
+      this._gazeWant.set(0.12, -0.5, 0); // eyes downcast
+    } else if (mode === "smug") {
+      this._gazeWant.set(-0.22, 0.16, 0); // chin-up, glancing aside
     }
 
     if (mode === "shy") {

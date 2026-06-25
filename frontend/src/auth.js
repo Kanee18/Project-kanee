@@ -75,6 +75,19 @@ export async function refreshProfile() {
   return snap.exists() ? snap.data() : null;
 }
 
+/**
+ * Read the current backend URL published to Firestore (config/runtime) by the
+ * tunnel script. Returns "" if unset/unavailable (caller falls back).
+ */
+export async function getBackendUrl() {
+  try {
+    const snap = await getDoc(doc(db, "config", "runtime"));
+    return snap.exists() ? (snap.data().backendUrl || "") : "";
+  } catch {
+    return "";
+  }
+}
+
 export function loginGoogle() {
   return signInWithPopup(auth, googleProvider);
 }

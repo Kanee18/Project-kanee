@@ -148,6 +148,19 @@ class SegmentPlayer {
     return this._ctx;
   }
 
+  /** Create + resume the AudioContext from inside a user gesture (the Start
+   *  button), so browser autoplay policy lets her voice play afterwards. */
+  async unlock() {
+    const ctx = this._ensureCtx();
+    if (ctx.state === "suspended") {
+      try {
+        await ctx.resume();
+      } catch {
+        /* ignore — playback will retry on first segment */
+      }
+    }
+  }
+
   async _next() {
     if (this._busy || this._queue.length === 0) return;
     this._busy = true;
@@ -656,9 +669,10 @@ function endMath() {
 }
 
 // After a reply finishes, the last emotion lingers briefly (a natural
-// trailing reaction), then the face settles back to neutral. Without this
-// she'd hold e.g. [surprised] — wide-eyed, blink suppressed — forever.
-const CALM_DOWN_MS = 1800;
+// trailing reaction), then the face eases back to neutral (gently, via the
+// FADE_OUT spring). Without this she'd hold e.g. [surprised] forever. Kept
+// short so the expression doesn't awkwardly hang around after she's done.
+const CALM_DOWN_MS = 700;
 let calmTimer = null;
 
 const player = new SegmentPlayer({
@@ -840,20 +854,34 @@ function playGreeting(slot) {
   player.enqueue(seg);
 }
 
-// Arrival greeting: deferred to the first user interaction because browser
-// autoplay policy keeps the AudioContext suspended until then.
+// Arrival greeting: gated behind the title screen's Start button. That click is
+// the user gesture browser autoplay policy needs before her voice can play.
 let greeted = false;
 function fireArrivalGreeting() {
   if (greeted) return;
   greeted = true;
-  window.removeEventListener("pointerdown", fireArrivalGreeting);
-  window.removeEventListener("keydown", fireArrivalGreeting);
   // Small delay so the just-resumed AudioContext is ready; the greeting itself
   // carries the hello wave (the spawn no longer waves, so there's no double-up).
   setTimeout(() => playGreeting(timeSlot()), 200);
 }
-window.addEventListener("pointerdown", fireArrivalGreeting);
-window.addEventListener("keydown", fireArrivalGreeting);
+
+// Title screen Start: unlock audio (within the gesture), fade the title out,
+// then greet. Replaces the old "click anywhere" trigger.
+const titleScreen = document.getElementById("titlescreen");
+const startBtn = document.getElementById("start-btn");
+startBtn?.addEventListener("click", async () => {
+  startBtn.disabled = true;
+  startBtn.textContent = "…";
+  try {
+    await player.unlock();
+  } catch {
+    /* ignore */
+  }
+  document.body.classList.remove("pre-start"); // reveal the chat UI
+  titleScreen?.classList.add("hidden");
+  setTimeout(() => titleScreen?.remove(), 600);
+  fireArrivalGreeting();
+});
 
 // Welcome-back: greet again when the tab regains focus after being away a while.
 const AWAY_MS = 5 * 60 * 1000;

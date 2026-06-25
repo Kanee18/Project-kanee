@@ -5,9 +5,27 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Kanee</title>
 </head>
-<body>
+<body class="pre-start">
   <div id="viewport">
     <div id="viewport-msg" hidden></div>
+  </div>
+
+  <!-- Title screen: the live 3D character renders behind it (transparent scrim +
+       vignette). The Start button unlocks audio (browser autoplay needs a user
+       gesture) and kicks off her greeting. -->
+  <div id="titlescreen">
+    <div class="ts-vignette"></div>
+    <div class="ts-scrim"></div>
+    <div class="ts-content">
+      <span class="ts-kicker">Private beta</span>
+      <h1 class="ts-name">Kanee</h1>
+      <span class="ts-tag">An expressive 3D companion</span>
+      <button id="start-btn" class="ts-start" type="button">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+        <span>Start</span>
+      </button>
+      <span class="ts-hint">press start to begin</span>
+    </div>
   </div>
 
   <div id="topbar">

@@ -8,4 +8,5 @@ httpx
 pyyaml
 python-dotenv
 psutil
+firebase-admin
 pytest

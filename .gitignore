@@ -2,6 +2,7 @@
 backend/.env
 backend/chat_history.json
 backend/user_memory.json
+backend/serviceAccount.json
 
 # python
 __pycache__/
@@ -16,6 +17,9 @@ landing/dist/
 
 # firebase hosting cache
 .firebase/
+
+# cloudflared binary (downloaded locally for the tunnel)
+cloudflared.exe
 
 # firebase project config (copy shared/firebase-config.example.js → firebase-config.js)
 shared/firebase-config.js

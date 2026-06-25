@@ -35,6 +35,46 @@ winget install --id Cloudflare.cloudflared
 
 ---
 
+## Recommended: automated setup (one click, auto URL, secured)
+
+This is the "my PC is the server" flow. The chat app discovers the backend URL
+automatically and only approved accounts can connect.
+
+### One-time
+
+1. **Service account** — Firebase console → Project settings → *Service
+   accounts* → **Generate new private key**. Save it as
+   `backend/serviceAccount.json` (gitignored). It powers two things:
+   - the backend verifies each visitor's Firebase token + beta access, and
+   - `serve_tunnel.py` publishes the live URL to Firestore.
+2. **Install the dep:** `py -m pip install firebase-admin`
+3. **Firestore rule** for the published URL — add the `config/{doc}` block from
+   `landing/SETUP.md` and Publish.
+4. **`cloudflared.exe`** at the repo root (already downloaded).
+
+### Every time you want to be online
+
+Just run the launcher from the repo root:
+
+```powershell
+./start-server.ps1
+```
+
+It opens the **backend** and the **tunnel** (`serve_tunnel.py`) in separate
+windows. `serve_tunnel.py` starts cloudflared, grabs the public URL, and writes
+it to Firestore `config/runtime.backendUrl`. The deployed chat app reads that on
+load — so testers just open **kanee-app.web.app** and click **Start chat**, no
+URL to copy. (Start GPT-SoVITS too, or set `$SovitsDir` in the script.)
+
+When you stop the tunnel window (Ctrl+C), the URL is cleared and the app shows
+offline. With the service account in place, the backend rejects anyone who
+isn't a signed-in, beta-approved user — so a leaked URL can't run up your bill.
+
+> The manual options below still work (e.g. `?api=` for quick debugging, or a
+> fixed `BACKEND_URL`). They're just not needed with the automated flow.
+
+---
+
 ## Option A — Quick Tunnel (fastest, no account/domain)
 
 Good for getting testers in today. The URL is random and changes each run.

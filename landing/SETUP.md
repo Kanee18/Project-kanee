@@ -68,6 +68,14 @@ service cloud.firestore {
       // only you (via the console) grant access; clients can't flip the flag
       allow delete: if false;
     }
+
+    // backend URL published by the tunnel script (serve_tunnel.py). Any
+    // signed-in user can read it; only the service account (which bypasses
+    // rules) writes it.
+    match /config/{doc} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
   }
 }
 ```
