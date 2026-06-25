@@ -433,6 +433,50 @@ body.pre-start #sidebar { opacity: 0; pointer-events: none; }
 }
 @keyframes toast-in { from { opacity: 0; transform: translateY(-8px); } }
 
+/* ---- phones / narrow portrait -------------------------------------- */
+@media (max-width: 640px) {
+  /* top bar: tighter, smaller chips, clear of the notch */
+  #topbar { top: max(10px, env(safe-area-inset-top)); padding: 0 10px; }
+  .chip { height: 30px; padding: 0 0.55rem; font-size: 0.68rem; }
+  .bar-left, .status { gap: 0.35rem; }
+
+  #toasts { top: 50px; left: 10px; right: 10px; max-width: none; }
+
+  /* dialogue: full width with small margins, hugging the bottom safe area */
+  #dialogue {
+    left: 8px;
+    right: 8px;
+    width: auto;
+    transform: none;
+    bottom: max(8px, env(safe-area-inset-bottom));
+    padding: 0.9rem 0.85rem 0.8rem;
+    border-radius: 14px;
+  }
+  #nameplate { left: 14px; top: -14px; font-size: 0.7rem; padding: 0.26rem 0.8rem; }
+  #dialogue-text {
+    font-size: 1rem;
+    line-height: 1.5;
+    min-height: 2.4em;
+    max-height: 24vh;
+    margin: 0.35rem 0 0.7rem;
+  }
+
+  /* input row: icon-only push-to-talk + a text field that can actually shrink
+     (flex items default to min-width:auto and would otherwise overflow) */
+  #inputbar { gap: 0.4rem; }
+  #talk span { display: none; }
+  #talk { padding: 0.7rem 0.8rem; min-height: 44px; }
+  #text { min-width: 0; padding: 0.65rem 0.8rem; min-height: 44px; }
+  #send { padding: 0.7rem 0.8rem; min-height: 44px; }
+
+  .ts-start { padding: 0.78rem 2rem; }
+}
+
+/* ---- short / landscape phones -------------------------------------- */
+@media (max-height: 460px) {
+  #dialogue-text { max-height: 30vh; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }

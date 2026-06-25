@@ -257,10 +257,21 @@ async function initAvatar(ui) {
   scene.add(fill);
   scene.add(new THREE.AmbientLight(0xffffff, 0.45));
 
+  // Vertical FOV for landscape/desktop. On a portrait (tall, narrow) viewport
+  // we WIDEN it so the horizontal framing stays put — otherwise the fixed
+  // vertical FOV makes the horizontal view collapse on a phone and crops her
+  // shoulders. Locks horizontal framing to the square-aspect view.
+  const BASE_FOV = 30;
   const resize = () => {
     const { clientWidth: w, clientHeight: h } = viewport;
     renderer.setSize(w, h);
     camera.aspect = w / h;
+    if (camera.aspect < 1) {
+      const halfH = Math.tan(THREE.MathUtils.degToRad(BASE_FOV) / 2);
+      camera.fov = THREE.MathUtils.radToDeg(2 * Math.atan(halfH / camera.aspect));
+    } else {
+      camera.fov = BASE_FOV;
+    }
     camera.updateProjectionMatrix();
   };
   new ResizeObserver(resize).observe(viewport);
