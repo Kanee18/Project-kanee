@@ -20,6 +20,7 @@ import base64
 import binascii
 import json
 import logging
+import os
 import time
 from collections import deque
 from contextlib import asynccontextmanager
@@ -31,7 +32,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 
 from asr import Transcriber
 from game_watcher import GameWatcher
-from llm import LLMClient
+from llm import LLMClient, LOCAL_UID
 from math_solver import solve as solve_math
 from parser import Segment, StreamingTagParser
 from tts import SovitsClient, TTSRequestError, TTSUnavailableError
@@ -44,8 +45,14 @@ _BACKEND_DIR = Path(__file__).resolve().parent
 # --- optional Firebase auth (protects the public/tunnelled backend) ----------
 # Drop a Firebase service-account JSON at backend/serviceAccount.json to require
 # a valid Firebase ID token from a beta-approved account on every WS connect.
-# Without the file, auth is OFF and the socket is open (fine for local dev).
+#
+# Without that file the backend is UNAUTHENTICATED, which is only safe on a
+# private machine. It therefore FAILS CLOSED: an unauthenticated backend refuses
+# every connection unless you explicitly opt in with KANEE_ALLOW_NO_AUTH=1
+# (local dev only — never when the port is exposed or tunnelled). This stops an
+# accidentally-exposed backend from being an open, billable LLM/ASR relay.
 _SA_PATH = _BACKEND_DIR / "serviceAccount.json"
+_ALLOW_NO_AUTH = os.getenv("KANEE_ALLOW_NO_AUTH", "").strip().lower() in {"1", "true", "yes", "on"}
 _AUTH_ENABLED = False
 _fb_auth = None
 _fb_fs = None
@@ -62,53 +69,91 @@ if _SA_PATH.exists():
         _AUTH_ENABLED = True
         logger.info("backend auth: ON — Firebase token + beta access required")
     except Exception as exc:  # noqa: BLE001
-        logger.warning("backend auth init failed (%s) — running OPEN", exc)
-else:
-    logger.warning("backend auth: OFF (no serviceAccount.json) — WS is open")
+        logger.warning("backend auth init failed (%s)", exc)
+
+if not _AUTH_ENABLED:
+    if _ALLOW_NO_AUTH:
+        logger.warning(
+            "backend auth: OFF (KANEE_ALLOW_NO_AUTH set) — WS is OPEN. "
+            "Local dev only; do NOT expose or tunnel this port."
+        )
+    else:
+        logger.warning(
+            "backend auth: OFF and not opted in — refusing all WS connections. "
+            "Add backend/serviceAccount.json to require sign-in, or set "
+            "KANEE_ALLOW_NO_AUTH=1 for local-only dev."
+        )
 
 
-async def _authenticate(ws: WebSocket) -> bool:
-    """Consume the client's first message (the auth handshake). When auth is
-    enabled, require a valid Firebase ID token from a beta-approved account."""
-    try:
-        msg = json.loads(await ws.receive_text())
-    except Exception:
-        await ws.close(code=4401)
-        return False
+async def _authenticate(ws: WebSocket) -> Optional[str]:
+    """Consume the client's first message (the auth handshake) and return the
+    authenticated user id, or None if the connection must be dropped.
 
-    if not _AUTH_ENABLED:
-        return True  # local/dev mode — any token is ignored
+    - Auth enabled: require a valid Firebase ID token from a beta-approved
+      account; returns the Firebase uid.
+    - Auth disabled + KANEE_ALLOW_NO_AUTH: returns LOCAL_UID (open dev mode).
+    - Auth disabled + not opted in: rejects (fail closed).
 
-    async def _reject(message: str, code: int) -> bool:
+    Note: betaAccess is re-checked here on EVERY connect, so flipping a user's
+    betaAccess to false in Firestore is an immediate kill-switch.
+    """
+    async def _reject(message: str, code: int) -> None:
         try:
             await ws.send_text(json.dumps({"type": "error", "message": message}))
             await ws.close(code=code)
         except Exception:
             pass
-        return False
+
+    try:
+        msg = json.loads(await ws.receive_text())
+    except Exception:
+        await _reject("Invalid auth handshake.", 4401)
+        return None
+
+    if not _AUTH_ENABLED:
+        if _ALLOW_NO_AUTH:
+            return LOCAL_UID
+        await _reject("This server isn't configured for sign-in.", 4401)
+        return None
 
     token = msg.get("token") if isinstance(msg, dict) else None
     if not isinstance(msg, dict) or msg.get("type") != "auth" or not token:
-        return await _reject("Sign-in required to chat.", 4401)
+        await _reject("Sign-in required to chat.", 4401)
+        return None
     try:
         decoded = await asyncio.to_thread(_fb_auth.verify_id_token, token)
     except Exception:
-        return await _reject("Your session is invalid — please sign in again.", 4401)
+        await _reject("Your session is invalid — please sign in again.", 4401)
+        return None
 
     uid = decoded.get("uid")
     try:
         snap = await asyncio.to_thread(lambda: _fb_fs.collection("users").document(uid).get())
         if not (snap.exists and (snap.to_dict() or {}).get("betaAccess") is True):
-            return await _reject("Your account doesn't have beta access yet.", 4403)
+            await _reject("Your account doesn't have beta access yet.", 4403)
+            return None
     except Exception as exc:  # noqa: BLE001
         # Token was valid; don't lock the user out over a transient Firestore error.
         logger.warning("beta-access check failed for %s: %s", uid, exc)
     logger.info("ws authenticated: %s", uid)
-    return True
+    return uid
+
+
+# -- abuse limits (per WS connection) -----------------------------------------
+_MAX_TEXT_CHARS = 4000               # reject a chat message longer than this
+_MAX_AUDIO_BYTES = 8 * 1024 * 1024   # 8 MiB cap on a decoded voice recording
+_RL_RATE = 1.0                       # sustained user messages allowed per second
+_RL_BURST = 6.0                      # token-bucket size (short bursts)
+
+
+class UserError(Exception):
+    """An error whose message is safe AND useful to show the user verbatim.
+    Everything else is reported to the client as a generic message (no internal
+    detail leak); the full traceback goes to the server log only."""
 
 
 class Pipeline:
-    """Shared clients + a lock that serializes replies (history is shared)."""
+    """Shared clients + a lock that serializes replies across the process."""
 
     def __init__(self, config: dict[str, Any]) -> None:
         self.llm = LLMClient(config)
@@ -137,11 +182,25 @@ app = FastAPI(lifespan=lifespan)
 class Session:
     """One WebSocket connection: routes messages, owns the active reply task."""
 
-    def __init__(self, ws: WebSocket, pipeline: Pipeline) -> None:
+    def __init__(self, ws: WebSocket, pipeline: Pipeline, user_id: str) -> None:
         self.ws = ws
         self.pipe = pipeline
+        self.uid = user_id  # scopes this connection's history/memory (see llm.py)
         self._task: Optional[asyncio.Task] = None
         self._game_events: deque[tuple[str, str, Optional[float]]] = deque(maxlen=3)
+        # Per-connection token bucket: refill _RL_RATE/s up to _RL_BURST.
+        self._tokens = _RL_BURST
+        self._last_refill = time.monotonic()
+
+    def _rate_ok(self) -> bool:
+        """True if this connection may start another costly (LLM/ASR) request."""
+        now = time.monotonic()
+        self._tokens = min(_RL_BURST, self._tokens + (now - self._last_refill) * _RL_RATE)
+        self._last_refill = now
+        if self._tokens < 1.0:
+            return False
+        self._tokens -= 1.0
+        return True
 
     async def send(self, msg: dict[str, Any]) -> None:
         await self.ws.send_text(json.dumps(msg))
@@ -151,11 +210,20 @@ class Session:
     async def handle(self, msg: dict[str, Any]) -> None:
         kind = msg.get("type")
         if kind == "user_text":
+            if not self._rate_ok():
+                await self.send({"type": "error", "message": "Slow down a moment — too many messages."})
+                return
             text = str(msg.get("text") or "").strip()
+            if len(text) > _MAX_TEXT_CHARS:
+                await self.send({"type": "error", "message": "That message is too long — keep it shorter."})
+                return
             if text:
                 self._game_events.clear()  # the user is talking — drop stale game banter
                 self._start(self._reply(text))
         elif kind == "user_audio":
+            if not self._rate_ok():
+                await self.send({"type": "error", "message": "Slow down a moment — too many messages."})
+                return
             self._game_events.clear()
             self._start(self._voice_reply(str(msg.get("audio") or "")))
         elif kind == "interrupt":
@@ -188,10 +256,21 @@ class Session:
         except asyncio.CancelledError:
             logger.info("reply cancelled (interrupt)")
             raise
-        except Exception as exc:
-            logger.exception("pipeline error")
+        except UserError as exc:
+            # Safe, actionable message — show it to the user as-is.
             try:
                 await self.send({"type": "error", "message": str(exc)})
+                await self.send({"type": "state", "value": "idle"})
+            except Exception:
+                pass  # socket already gone
+        except Exception:
+            # Unexpected: log the full detail server-side, tell the user nothing
+            # internal (no paths, provider errors, or stack hints leak out).
+            logger.exception("pipeline error")
+            try:
+                await self.send(
+                    {"type": "error", "message": "Something went wrong on my end — try again in a moment."}
+                )
                 await self.send({"type": "state", "value": "idle"})
             except Exception:
                 pass  # socket already gone
@@ -200,12 +279,18 @@ class Session:
 
     async def _voice_reply(self, audio_b64: str) -> None:
         await self.send({"type": "state", "value": "thinking"})
+        # Reject oversized payloads before spending work decoding them (base64 is
+        # ~4/3 the byte size).
+        if len(audio_b64) > _MAX_AUDIO_BYTES * 4 // 3 + 1024:
+            raise UserError("That recording is too large — keep it under a few seconds.")
         try:
             audio = base64.b64decode(audio_b64)
         except (binascii.Error, ValueError):
-            raise ValueError("Could not decode the audio payload — try again.")
+            raise UserError("Could not decode the audio payload — try again.")
         if not audio:
-            raise ValueError("The recording was empty — hold the button while you speak.")
+            raise UserError("The recording was empty — hold the button while you speak.")
+        if len(audio) > _MAX_AUDIO_BYTES:
+            raise UserError("That recording is too large — keep it under a few seconds.")
         text = await self.pipe.asr.transcribe(audio)
         if not text:
             await self.send(
@@ -225,7 +310,7 @@ class Session:
             if math is not None:
                 logger.info("math: %s = %s", math["expr"], math["answer"])
                 await self.send({"type": "math", "expr": math["expr"], "answer": math["answer"]})
-            await self._stream_segments(self.pipe.llm.stream_reply(user_text), t0)
+            await self._stream_segments(self.pipe.llm.stream_reply(user_text, self.uid), t0)
 
     async def comment_on_game(self, kind: str, game: str, minutes: Optional[float] = None) -> None:
         """Proactively comment on the game the user is playing (no thinking
@@ -234,7 +319,7 @@ class Session:
         logger.info("game comment: %s %s -> asking LLM to react", kind, game)
         async with self.pipe.reply_lock:
             t0 = time.perf_counter()
-            await self._stream_segments(self.pipe.llm.stream_comment(cue), t0)
+            await self._stream_segments(self.pipe.llm.stream_comment(cue, self.uid), t0)
 
     @staticmethod
     def _game_cue(kind: str, game: str, minutes: Optional[float]) -> str:
@@ -333,14 +418,19 @@ class Session:
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket) -> None:
     await websocket.accept()
-    session = Session(websocket, websocket.app.state.pipeline)
     logger.info("websocket connected")
-    if not await _authenticate(websocket):
+    uid = await _authenticate(websocket)
+    if uid is None:
         logger.info("websocket rejected (auth)")
         return
-    # Watch for games in the foreground and let her comment proactively.
+    session = Session(websocket, websocket.app.state.pipeline, uid)
+    # Proactive game comments watch the HOST machine's foreground process, so
+    # only run them in local single-user mode — with remote authenticated users
+    # this would leak the host's activity (what the owner is playing) to clients.
     watcher = GameWatcher(session.maybe_comment)
-    watcher.start()
+    watch_games = not _AUTH_ENABLED
+    if watch_games:
+        watcher.start()
     try:
         while True:
             raw = await websocket.receive_text()
@@ -353,5 +443,6 @@ async def websocket_endpoint(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         logger.info("websocket disconnected")
     finally:
-        await watcher.stop()
+        if watch_games:
+            await watcher.stop()
         await session.cancel_reply()

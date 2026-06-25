@@ -2,16 +2,24 @@
 
 Yields raw reply chunks (which still contain the emotion/gesture tags);
 turning the stream into tagged sentence segments is parser.py's job.
+
+Conversation history and long-term memory are kept PER USER (keyed by the
+authenticated uid), so beta users sharing one backend never see each other's
+chat or "remembered facts". The local/dev user (uid == LOCAL_UID) keeps using
+the original top-level history/memory files; every other uid is isolated under
+backend/userdata/<uid>/.
 """
 
 from __future__ import annotations
 
 import asyncio
 import difflib
+import hashlib
 import json
 import logging
 import re
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -22,9 +30,38 @@ logger = logging.getLogger(__name__)
 _BACKEND_DIR = Path(__file__).resolve().parent
 load_dotenv(_BACKEND_DIR / ".env")
 
+# Sentinel uid for the single local/dev user (auth off). Imported by main.py so
+# both sides agree on the key. The local user keeps the legacy file locations.
+LOCAL_UID = "__local__"
+
+
+def _safe_dir(uid: str) -> str:
+    """A filesystem-safe directory name for a uid (defends against path
+    traversal from an unexpected uid value)."""
+    if re.fullmatch(r"[A-Za-z0-9_-]{1,64}", uid):
+        return uid
+    return "u_" + hashlib.sha256(uid.encode("utf-8")).hexdigest()[:32]
+
+
+@dataclass
+class _UserState:
+    """One user's isolated conversation state."""
+
+    uid: str
+    history_file: Path
+    memory_file: Path
+    history: list[dict[str, str]] = field(default_factory=list)
+    memory: list[str] = field(default_factory=list)
+    turn_note: str = ""  # transient per-turn directive injected into the system prompt
+    memory_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
 
 class LLMClient:
-    """Streams tagged character replies from the configured LLM provider."""
+    """Streams tagged character replies from the configured LLM provider.
+
+    Shared across all connections; per-user state lives in `_UserState` objects
+    looked up by uid via `_state()`.
+    """
 
     def __init__(self, config: dict[str, Any]) -> None:
         llm_cfg = config["llm"]
@@ -32,24 +69,16 @@ class LLMClient:
         self.model: str = llm_cfg["model"]
         self.max_tokens: int = int(llm_cfg.get("max_tokens", 1024))
         self.max_history_turns: int = int(llm_cfg.get("max_history_turns", 30))
-        self.history_file: Path = _BACKEND_DIR / llm_cfg.get("history_file", "chat_history.json")
         self.system_prompt: str = config["character"]["system_prompt"]
-        self.history: list[dict[str, str]] = self._load_history()
 
-        # Long-term "key facts" memory: durable facts about the user, distilled
-        # from past conversations and injected into the system prompt so she
-        # remembers across sessions even after old turns scroll out of history.
-        self.memory_file: Path = _BACKEND_DIR / llm_cfg.get("memory_file", "user_memory.json")
+        # Per-user file names (the local user uses these at the backend root;
+        # other users get their own copy under userdata/<uid>/).
+        self._history_name: str = llm_cfg.get("history_file", "chat_history.json")
+        self._memory_name: str = llm_cfg.get("memory_file", "user_memory.json")
         self.max_memory_facts: int = int(llm_cfg.get("max_memory_facts", 50))
-        self.memory: list[str] = self._load_memory()
-        self._memory_lock = asyncio.Lock()
+
+        self._users: dict[str, _UserState] = {}
         self._bg_tasks: set[asyncio.Task[Any]] = set()
-        self._turn_note = ""  # transient per-turn directive injected into the system prompt
-        # Materialize the file right away so it's visibly present and starts
-        # populating as facts are learned (rather than appearing only on the
-        # first successful extraction).
-        if not self.memory_file.exists():
-            self._save_memory()
 
         if self.provider == "anthropic":
             import anthropic
@@ -71,7 +100,31 @@ class LLMClient:
             )
         logger.info("LLM client ready: provider=%s model=%s", self.provider, self.model)
 
-    async def stream_reply(self, user_text: str) -> AsyncIterator[str]:
+    # -- per-user state -----------------------------------------------------
+
+    def _state(self, uid: str) -> _UserState:
+        """Get (or lazily load) the isolated state for one user."""
+        st = self._users.get(uid)
+        if st is not None:
+            return st
+        if uid == LOCAL_UID:
+            history_file = _BACKEND_DIR / self._history_name
+            memory_file = _BACKEND_DIR / self._memory_name
+        else:
+            udir = _BACKEND_DIR / "userdata" / _safe_dir(uid)
+            udir.mkdir(parents=True, exist_ok=True)
+            history_file = udir / "chat_history.json"
+            memory_file = udir / "user_memory.json"
+        st = _UserState(uid=uid, history_file=history_file, memory_file=memory_file)
+        st.history = self._load_history(st)
+        st.memory = self._load_memory(st)
+        # Materialize the memory file so it's visibly present from the start.
+        if not st.memory_file.exists():
+            self._save_memory(st)
+        self._users[uid] = st
+        return st
+
+    async def stream_reply(self, user_text: str, user_id: str) -> AsyncIterator[str]:
         """Send one user message; yield the reply as raw text chunks.
 
         The user turn is added to history immediately and rolled back if the
@@ -79,10 +132,11 @@ class LLMClient:
         turn (with tags intact, to keep the persona consistent) is appended
         and persisted once the stream completes.
         """
+        st = self._state(user_id)
         # Detect a repeated question (vs. prior turns) BEFORE appending this one,
         # so she can tease the user for asking the same thing again.
-        self._turn_note = self._repeat_note(user_text)
-        self.history.append({"role": "user", "content": user_text})
+        st.turn_note = self._repeat_note(user_text, st)
+        st.history.append({"role": "user", "content": user_text})
         t0 = time.perf_counter()
         first_chunk_at: float | None = None
         parts: list[str] = []
@@ -91,7 +145,7 @@ class LLMClient:
             "openai": self._stream_openai,
             "google": self._stream_google,
         }
-        stream = streamers[self.provider](list(self.history))
+        stream = streamers[self.provider](list(st.history), st)
         try:
             async for chunk in stream:
                 if first_chunk_at is None:
@@ -104,28 +158,29 @@ class LLMClient:
             # the conversation stays coherent; drop the turn if nothing came.
             if parts:
                 partial = "".join(parts)
-                self.history.append({"role": "assistant", "content": partial})
-                self._trim_history()
-                self._save_history()
-                self._schedule_memory_update(user_text, partial)
+                st.history.append({"role": "assistant", "content": partial})
+                self._trim_history(st)
+                self._save_history(st)
+                self._schedule_memory_update(user_text, partial, st)
             else:
-                self.history.pop()
+                st.history.pop()
             raise
         except Exception:
-            self.history.pop()
+            st.history.pop()
             raise
         reply = "".join(parts)
-        self.history.append({"role": "assistant", "content": reply})
-        self._trim_history()
-        self._save_history()
-        self._schedule_memory_update(user_text, reply)
+        st.history.append({"role": "assistant", "content": reply})
+        self._trim_history(st)
+        self._save_history(st)
+        self._schedule_memory_update(user_text, reply, st)
         logger.info("LLM reply complete: %d chars in %.2fs", len(reply), time.perf_counter() - t0)
 
-    async def stream_comment(self, cue: str) -> AsyncIterator[str]:
+    async def stream_comment(self, cue: str, user_id: str) -> AsyncIterator[str]:
         """Proactive in-character comment from a live system cue (e.g. a game
         the user just opened). The cue is shown to the model as context but is
         NOT stored in history and skips repeat-detection — it's ephemeral
         banter, not part of the conversation transcript."""
+        st = self._state(user_id)
         directive = (
             "SYSTEM EVENT — the user did NOT type this; it is a live cue about "
             f"what they are doing on their computer right now: {cue} "
@@ -133,19 +188,21 @@ class LLMClient:
             "hanging out watching them play. Use your usual personality (tease, "
             "cheer them on, act aloof) and the tag protocol as always."
         )
-        self._turn_note = ""  # no repeat-detection for proactive comments
-        messages = [*self.history, {"role": "user", "content": directive}]
+        st.turn_note = ""  # no repeat-detection for proactive comments
+        messages = [*st.history, {"role": "user", "content": directive}]
         streamers = {
             "anthropic": self._stream_anthropic,
             "openai": self._stream_openai,
             "google": self._stream_google,
         }
-        async for chunk in streamers[self.provider](messages):
+        async for chunk in streamers[self.provider](messages, st):
             yield chunk
 
     # -- providers ----------------------------------------------------------
 
-    async def _stream_anthropic(self, messages: list[dict[str, str]]) -> AsyncIterator[str]:
+    async def _stream_anthropic(
+        self, messages: list[dict[str, str]], st: _UserState
+    ) -> AsyncIterator[str]:
         # Persona is the stable, cacheable prefix; the memory block is a
         # separate, uncached block since it changes as facts are learned.
         system: list[dict[str, Any]] = [
@@ -155,11 +212,11 @@ class LLMClient:
                 "cache_control": {"type": "ephemeral"},
             }
         ]
-        mem = self._memory_block()
+        mem = self._memory_block(st)
         if mem:
             system.append({"type": "text", "text": mem})
-        if self._turn_note:
-            system.append({"type": "text", "text": self._turn_note})
+        if st.turn_note:
+            system.append({"type": "text", "text": st.turn_note})
         async with self._client.messages.stream(
             model=self.model,
             max_tokens=self.max_tokens,
@@ -169,18 +226,22 @@ class LLMClient:
             async for text in stream.text_stream:
                 yield text
 
-    async def _stream_openai(self, messages: list[dict[str, str]]) -> AsyncIterator[str]:
+    async def _stream_openai(
+        self, messages: list[dict[str, str]], st: _UserState
+    ) -> AsyncIterator[str]:
         stream = await self._client.chat.completions.create(
             model=self.model,
             max_tokens=self.max_tokens,
             stream=True,
-            messages=[{"role": "system", "content": self._system_text()}, *messages],
+            messages=[{"role": "system", "content": self._system_text(st)}, *messages],
         )
         async for event in stream:
             if event.choices and event.choices[0].delta and event.choices[0].delta.content:
                 yield event.choices[0].delta.content
 
-    async def _stream_google(self, messages: list[dict[str, str]]) -> AsyncIterator[str]:
+    async def _stream_google(
+        self, messages: list[dict[str, str]], st: _UserState
+    ) -> AsyncIterator[str]:
         from google.genai import types
 
         # Gemini uses role "model" for the assistant and nests text under
@@ -196,7 +257,7 @@ class LLMClient:
             model=self.model,
             contents=contents,
             config=types.GenerateContentConfig(
-                system_instruction=self._system_text(),
+                system_instruction=self._system_text(st),
                 max_output_tokens=self.max_tokens,
             ),
         )
@@ -206,30 +267,30 @@ class LLMClient:
 
     # -- history ------------------------------------------------------------
 
-    def _trim_history(self) -> None:
+    def _trim_history(self, st: _UserState) -> None:
         limit = self.max_history_turns * 2  # one turn = user + assistant message
-        if len(self.history) > limit:
-            self.history = self.history[-limit:]
+        if len(st.history) > limit:
+            st.history = st.history[-limit:]
 
-    def _load_history(self) -> list[dict[str, str]]:
-        if not self.history_file.exists():
+    def _load_history(self, st: _UserState) -> list[dict[str, str]]:
+        if not st.history_file.exists():
             return []
         try:
-            data = json.loads(self.history_file.read_text(encoding="utf-8"))
+            data = json.loads(st.history_file.read_text(encoding="utf-8"))
             if isinstance(data, list):
-                logger.info("loaded %d history messages from %s", len(data), self.history_file.name)
+                logger.info("loaded %d history messages for %s", len(data), st.uid)
                 return data
-            logger.warning("%s is not a list — starting with empty history", self.history_file.name)
+            logger.warning("%s is not a list — starting with empty history", st.history_file.name)
         except (OSError, json.JSONDecodeError) as exc:
             logger.warning(
-                "could not read %s (%s) — starting with empty history", self.history_file.name, exc
+                "could not read %s (%s) — starting with empty history", st.history_file.name, exc
             )
         return []
 
-    def _save_history(self) -> None:
+    def _save_history(self, st: _UserState) -> None:
         try:
-            self.history_file.write_text(
-                json.dumps(self.history, ensure_ascii=False, indent=2), encoding="utf-8"
+            st.history_file.write_text(
+                json.dumps(st.history, ensure_ascii=False, indent=2), encoding="utf-8"
             )
         except OSError as exc:
             logger.warning("could not save chat history: %s", exc)
@@ -242,19 +303,19 @@ class LLMClient:
         """Drop the [emotion]/[gesture] markers so memory sees clean prose."""
         return re.sub(r"\s+", " ", self._TAG_RE.sub("", text)).strip()
 
-    def _memory_block(self) -> str:
+    def _memory_block(self, st: _UserState) -> str:
         """Render the known facts as a prompt block (empty string if none)."""
-        if not self.memory:
+        if not st.memory:
             return ""
-        facts = "\n".join(f"- {f}" for f in self.memory)
+        facts = "\n".join(f"- {f}" for f in st.memory)
         return (
             "WHAT YOU REMEMBER ABOUT THE USER (from past conversations — weave "
             "it in naturally when relevant; never recite it like a list):\n" + facts
         )
 
-    def _system_text(self) -> str:
+    def _system_text(self, st: _UserState) -> str:
         """Persona + memory + this turn's note, for single-string providers."""
-        extra = "\n\n".join(b for b in (self._memory_block(), self._turn_note) if b)
+        extra = "\n\n".join(b for b in (self._memory_block(st), st.turn_note) if b)
         return f"{self.system_prompt}\n\n{extra}" if extra else self.system_prompt
 
     # -- repeated-question detection ----------------------------------------
@@ -274,14 +335,14 @@ class LLMClient:
             return True
         return difflib.SequenceMatcher(None, a_norm, b).ratio() >= 0.85
 
-    def _repeat_note(self, user_text: str) -> str:
+    def _repeat_note(self, user_text: str, st: _UserState) -> str:
         """A directive when the user keeps asking the same thing, so she can
         tease them for it. Counts near-identical PRIOR user turns in history."""
         norm = self._normalize(user_text)
         if len(norm) < 4:
             return ""  # ignore trivial "hi"/"ok"-type messages
         repeats = sum(
-            1 for m in self.history if m.get("role") == "user" and self._similar(norm, m.get("content", ""))
+            1 for m in st.history if m.get("role") == "user" and self._similar(norm, m.get("content", ""))
         )
         if repeats == 0:
             return ""
@@ -295,26 +356,26 @@ class LLMClient:
             f"good-natured, never genuinely harsh."
         )
 
-    def _schedule_memory_update(self, user_text: str, reply: str) -> None:
+    def _schedule_memory_update(self, user_text: str, reply: str, st: _UserState) -> None:
         """Fire-and-forget the fact extraction so it never blocks the reply."""
         reply = self._strip_tags(reply)
         if not user_text.strip() or not reply:
             return
-        task = asyncio.create_task(self._safe_update_memory(user_text, reply))
+        task = asyncio.create_task(self._safe_update_memory(user_text, reply, st))
         self._bg_tasks.add(task)
         task.add_done_callback(self._bg_tasks.discard)
 
-    async def _safe_update_memory(self, user_text: str, reply: str) -> None:
+    async def _safe_update_memory(self, user_text: str, reply: str, st: _UserState) -> None:
         try:
-            async with self._memory_lock:
-                await self._update_memory(user_text, reply)
+            async with st.memory_lock:
+                await self._update_memory(user_text, reply, st)
         except Exception as exc:  # memory is best-effort; never disturb the chat
             logger.warning("memory update failed: %s", exc)
 
-    async def _update_memory(self, user_text: str, reply: str) -> None:
+    async def _update_memory(self, user_text: str, reply: str, st: _UserState) -> None:
         """Ask the LLM to fold the latest exchange into the durable fact list."""
-        logger.info("memory: distilling facts from latest exchange...")
-        facts_block = "\n".join(f"- {f}" for f in self.memory) or "(none yet)"
+        logger.info("memory: distilling facts from latest exchange for %s...", st.uid)
+        facts_block = "\n".join(f"- {f}" for f in st.memory) or "(none yet)"
         prompt = (
             "You maintain a concise long-term memory of durable facts about a "
             "user, for a friendly anime assistant named Kanee.\n\n"
@@ -342,10 +403,10 @@ class LLMClient:
         if facts is None:
             return  # couldn't parse — keep the existing memory untouched
         facts = facts[: self.max_memory_facts]
-        if facts != self.memory:
-            self.memory = facts
-            self._save_memory()
-            logger.info("memory updated: %d fact(s) known", len(self.memory))
+        if facts != st.memory:
+            st.memory = facts
+            self._save_memory(st)
+            logger.info("memory updated for %s: %d fact(s) known", st.uid, len(st.memory))
 
     @staticmethod
     def _parse_facts(raw: str) -> list[str] | None:
@@ -410,26 +471,26 @@ class LLMClient:
         )
         return resp.text or ""
 
-    def _load_memory(self) -> list[str]:
-        if not self.memory_file.exists():
+    def _load_memory(self, st: _UserState) -> list[str]:
+        if not st.memory_file.exists():
             return []
         try:
-            data = json.loads(self.memory_file.read_text(encoding="utf-8"))
+            data = json.loads(st.memory_file.read_text(encoding="utf-8"))
             if isinstance(data, list):
                 facts = [str(x).strip() for x in data if str(x).strip()]
-                logger.info("loaded %d remembered fact(s) from %s", len(facts), self.memory_file.name)
+                logger.info("loaded %d remembered fact(s) for %s", len(facts), st.uid)
                 return facts
-            logger.warning("%s is not a list — starting with empty memory", self.memory_file.name)
+            logger.warning("%s is not a list — starting with empty memory", st.memory_file.name)
         except (OSError, json.JSONDecodeError) as exc:
             logger.warning(
-                "could not read %s (%s) — starting with empty memory", self.memory_file.name, exc
+                "could not read %s (%s) — starting with empty memory", st.memory_file.name, exc
             )
         return []
 
-    def _save_memory(self) -> None:
+    def _save_memory(self, st: _UserState) -> None:
         try:
-            self.memory_file.write_text(
-                json.dumps(self.memory, ensure_ascii=False, indent=2), encoding="utf-8"
+            st.memory_file.write_text(
+                json.dumps(st.memory, ensure_ascii=False, indent=2), encoding="utf-8"
             )
         except OSError as exc:
             logger.warning("could not save memory: %s", exc)

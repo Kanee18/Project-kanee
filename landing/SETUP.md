@@ -47,41 +47,31 @@ export const BETA_CONTACT = "you@example.com";       // where access requests go
 
 ## 3. Firestore security rules
 
-**Build → Firestore → Rules**, paste this, then **Publish**:
+The rules live in version control at **`firestore.rules`** (repo root) and are
+the real authorization boundary — do **not** rely on editing them in the
+console. Deploy them with:
 
-```text
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    match /users/{uid} {
-      // a signed-in user can read only their own doc
-      allow read: if request.auth != null && request.auth.uid == uid;
-
-      // they may create their own doc, but only with betaAccess = false
-      allow create: if request.auth != null && request.auth.uid == uid
-                    && request.resource.data.betaAccess == false;
-
-      // they may update their own doc but may NEVER change betaAccess
-      allow update: if request.auth != null && request.auth.uid == uid
-                    && request.resource.data.betaAccess == resource.data.betaAccess;
-
-      // only you (via the console) grant access; clients can't flip the flag
-      allow delete: if false;
-    }
-
-    // backend URL published by the tunnel script (serve_tunnel.py). Any
-    // signed-in user can read it; only the service account (which bypasses
-    // rules) writes it.
-    match /config/{doc} {
-      allow read: if request.auth != null;
-      allow write: if false;
-    }
-  }
-}
+```bash
+firebase deploy --only firestore:rules
 ```
 
-This makes the gate tamper-proof: a user can't grant themselves access from the
-browser.
+Then **verify** in **Build → Firestore → Rules** that the live rules match the
+file (especially: the DB must NOT be in open "test mode").
+
+What they enforce:
+
+- `users/{uid}` — a signed-in user can read **only their own** doc (no listing
+  the collection); may create it only with `betaAccess == false`; may update it
+  but can **never** change `betaAccess`; can't delete it. Only you (console /
+  Admin SDK) flip `betaAccess` to `true`.
+- `config/{doc}` — any signed-in user may **read** the backend URL; **no client
+  may write** it (only the service account, which bypasses rules, publishes it).
+  This matters: a client write here could point every app at a malicious backend
+  and harvest sign-in tokens.
+- Everything else is denied by default.
+
+This makes the gate tamper-proof: a user can't grant themselves access, read
+other users' data, or hijack the backend pointer from the browser.
 
 ## 4. Authorized domains
 

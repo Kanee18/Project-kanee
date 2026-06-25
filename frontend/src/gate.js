@@ -159,13 +159,17 @@ export function requireAccess() {
       const contact = `mailto:${BETA_CONTACT}?subject=${encodeURIComponent("Kanee beta access request")}`;
       card.innerHTML = `${BRAND}
         <h2>Almost there ✨</h2>
-        <p>Hi ${user.displayName || user.email}! Your account is created, but beta access
+        <p>Hi <span id="k-greet"></span>! Your account is created, but beta access
         hasn't been granted yet. Contact us and we'll unlock it by hand.</p>
         <a class="kbtn solid" href="${contact}">Request access</a>
         <button class="kbtn ghost" id="k-recheck">I've been approved — re-check</button>
         <button class="kbtn ghost" id="k-logout">Sign out</button>
         <div class="kgate-msg" id="k-msg"></div>
         <a class="kgate-link" href="${SITE_URL}">← Back to the site</a>`;
+
+      // Set the name via textContent so a user-chosen displayName (set at email
+      // sign-up, unsanitized) can never inject HTML/script into the gate.
+      card.querySelector("#k-greet").textContent = user.displayName || user.email || "there";
 
       const msg = card.querySelector("#k-msg");
       card.querySelector("#k-recheck").onclick = async () => {

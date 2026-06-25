@@ -55,21 +55,40 @@ jobs:
           fi
 
       # Recreate the gitignored shared Firebase config from repo variables.
+      # Values are passed via env (never interpolated as ${{ }} INTO the shell
+      # body) and emitted with JSON.stringify, so a value containing quotes or
+      # shell metacharacters can't break out or corrupt the file.
       - name: Write shared/firebase-config.js
         if: steps.check.outputs.ready == 'true'
+        env:
+          FIREBASE_API_KEY: ${{ vars.FIREBASE_API_KEY }}
+          FIREBASE_AUTH_DOMAIN: ${{ vars.FIREBASE_AUTH_DOMAIN }}
+          FIREBASE_PROJECT_ID: ${{ vars.FIREBASE_PROJECT_ID }}
+          FIREBASE_STORAGE_BUCKET: ${{ vars.FIREBASE_STORAGE_BUCKET }}
+          FIREBASE_MESSAGING_SENDER_ID: ${{ vars.FIREBASE_MESSAGING_SENDER_ID }}
+          FIREBASE_APP_ID: ${{ vars.FIREBASE_APP_ID }}
+          CHAT_URL: ${{ vars.CHAT_URL }}
+          SITE_URL: ${{ vars.SITE_URL }}
+          BETA_CONTACT: ${{ vars.BETA_CONTACT }}
         run: |
-          cat > shared/firebase-config.js <<'EOF'
-          export const firebaseConfig = {
-            apiKey: "${{ vars.FIREBASE_API_KEY }}",
-            authDomain: "${{ vars.FIREBASE_AUTH_DOMAIN }}",
-            projectId: "${{ vars.FIREBASE_PROJECT_ID }}",
-            storageBucket: "${{ vars.FIREBASE_STORAGE_BUCKET }}",
-            messagingSenderId: "${{ vars.FIREBASE_MESSAGING_SENDER_ID }}",
-            appId: "${{ vars.FIREBASE_APP_ID }}",
+          node <<'EOF'
+          const fs = require("fs");
+          const e = process.env;
+          const cfg = {
+            apiKey: e.FIREBASE_API_KEY,
+            authDomain: e.FIREBASE_AUTH_DOMAIN,
+            projectId: e.FIREBASE_PROJECT_ID,
+            storageBucket: e.FIREBASE_STORAGE_BUCKET,
+            messagingSenderId: e.FIREBASE_MESSAGING_SENDER_ID,
+            appId: e.FIREBASE_APP_ID,
           };
-          export const CHAT_URL = "${{ vars.CHAT_URL }}";
-          export const SITE_URL = "${{ vars.SITE_URL }}";
-          export const BETA_CONTACT = "${{ vars.BETA_CONTACT }}";
+          const out =
+            "export const firebaseConfig = " + JSON.stringify(cfg, null, 2) + ";\n" +
+            "export const CHAT_URL = " + JSON.stringify(e.CHAT_URL || "") + ";\n" +
+            "export const SITE_URL = " + JSON.stringify(e.SITE_URL || "") + ";\n" +
+            "export const BETA_CONTACT = " + JSON.stringify(e.BETA_CONTACT || "") + ";\n";
+          fs.writeFileSync("shared/firebase-config.js", out);
+          console.log("wrote shared/firebase-config.js");
           EOF
 
       - name: Install & build

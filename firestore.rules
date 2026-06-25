@@ -1,0 +1,43 @@
+rules_version = '2';
+
+// Firestore security rules for Kanee — the REAL authorization boundary.
+// These are deployed with:  firebase deploy --only firestore:rules
+// Keep them here in version control; never rely on console-only edits.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // users/{uid} = { email, displayName, betaAccess: bool, plan, createdAt }
+    match /users/{uid} {
+      // A signed-in user can read ONLY their own doc (no listing the whole
+      // collection: a collection query can't satisfy uid == auth.uid).
+      allow read: if request.auth != null && request.auth.uid == uid;
+
+      // They may create their own doc, but only with betaAccess == false.
+      allow create: if request.auth != null
+                    && request.auth.uid == uid
+                    && request.resource.data.betaAccess == false;
+
+      // They may update their own doc but may NEVER change betaAccess — only
+      // you, via the Firebase console / Admin SDK, can flip it to true.
+      allow update: if request.auth != null
+                    && request.auth.uid == uid
+                    && request.resource.data.betaAccess == resource.data.betaAccess;
+
+      allow delete: if false;
+    }
+
+    // config/runtime = { backendUrl, updatedAt } — published ONLY by the
+    // backend (Admin SDK, which bypasses these rules). Clients may read it to
+    // discover the backend, but must NEVER write it: a client write here would
+    // let an attacker point every app at a malicious backend and harvest tokens.
+    match /config/{doc} {
+      allow read: if request.auth != null;
+      allow write: if false;
+    }
+
+    // Default deny: anything not matched above is forbidden.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

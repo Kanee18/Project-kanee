@@ -3,6 +3,7 @@ backend/.env
 backend/chat_history.json
 backend/user_memory.json
 backend/serviceAccount.json
+backend/userdata/
 
 # python
 __pycache__/

@@ -13,30 +13,43 @@ import { auth } from "./auth.js";
 
 /**
  * Where to open the WebSocket. Priority:
- *   1. ?api=<url> query param (persisted) — manual override for debugging.
- *   2. localStorage "kanee_backend" (set by #1 on a previous visit).
+ *   1. (DEV ONLY) ?api=<url> query param (persisted) — manual debug override.
+ *   2. (DEV ONLY) localStorage "kanee_backend" (set by #1 on a previous visit).
  *   3. runtime URL from Firestore (published by the tunnel script).
  *   4. BACKEND_URL from the shared config (a fixed/named backend).
  *   5. same-origin /ws — local dev, where Vite proxies /ws to the backend.
  * A base URL (http/https) is converted to ws/wss and gets "/ws" appended.
+ *
+ * SECURITY: ?api= and its localStorage cache are honored ONLY in dev builds.
+ * In production they're ignored — otherwise a crafted link like
+ * `…/?api=wss://evil.tld` would make the app send the user's Firebase ID token
+ * to an attacker's backend (see the auth handshake in _connect). Production
+ * resolves the backend solely from trusted sources: Firestore config/runtime
+ * (write-locked by security rules), BACKEND_URL, or same-origin.
  */
 function resolveWsUrl() {
-  try {
-    const q = new URLSearchParams(location.search).get("api");
-    if (q) localStorage.setItem("kanee_backend", q.trim());
-  } catch {
-    /* private mode / blocked storage — ignore */
-  }
   let base = "";
-  try {
-    base = localStorage.getItem("kanee_backend") || "";
-  } catch {
-    /* ignore */
+  if (import.meta.env.DEV) {
+    try {
+      const q = new URLSearchParams(location.search).get("api");
+      if (q) localStorage.setItem("kanee_backend", q.trim());
+    } catch {
+      /* private mode / blocked storage — ignore */
+    }
+    try {
+      base = localStorage.getItem("kanee_backend") || "";
+    } catch {
+      /* ignore */
+    }
   }
   if (!base) base = getRuntimeBackend();
   if (!base) base = BACKEND_URL || "";
   if (base) {
-    return base.trim().replace(/^http/i, "ws").replace(/\/+$/, "") + "/ws";
+    let url = base.trim().replace(/^http/i, "ws").replace(/\/+$/, "") + "/ws";
+    // On an https page, never downgrade to an insecure ws:// socket (mixed
+    // content also sends the token in cleartext). Force wss.
+    if (location.protocol === "https:") url = url.replace(/^ws:/i, "wss:");
+    return url;
   }
   const proto = location.protocol === "https:" ? "wss" : "ws";
   return `${proto}://${location.host}/ws`;

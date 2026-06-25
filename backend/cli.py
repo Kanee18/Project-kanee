@@ -24,7 +24,7 @@ from typing import Optional
 
 import yaml
 
-from llm import LLMClient
+from llm import LLMClient, LOCAL_UID
 from parser import Segment, StreamingTagParser
 from tts import SovitsClient, TTSRequestError, TTSUnavailableError
 
@@ -100,7 +100,7 @@ async def chat_once(client: LLMClient, tts: Optional[SovitsClient], user_text: s
             await seg_q.put(seg)
 
         try:
-            async for chunk in client.stream_reply(user_text):
+            async for chunk in client.stream_reply(user_text, LOCAL_UID):
                 for seg in parser.feed(chunk):
                     await on_segment(seg)
             for seg in parser.finish():

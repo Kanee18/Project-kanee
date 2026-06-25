@@ -13,16 +13,33 @@ in the message can't run.
 from __future__ import annotations
 
 import ast
+import math
 import operator
 import re
 from typing import Optional
+
+# Cap the size of a power result so a pathological expression like "2^99999999"
+# can't freeze the server building a giant integer (solve() runs on the event
+# loop). Arithmetic here is shown on a small hologram, so anything past ~15
+# digits isn't useful anyway; over the cap we just return None (the LLM still
+# answers in words). Multiplication chains are bounded by the message length cap.
+_MAX_RESULT_DIGITS = 15
+
+
+def _guarded_pow(base: float, exp: float) -> float:
+    """operator.pow, but refuses a result too large to compute/display cheaply."""
+    digits = 0.0 if abs(base) <= 1 or exp <= 0 else exp * math.log10(abs(base))
+    if digits > _MAX_RESULT_DIGITS:
+        raise ValueError("power result too large")
+    return operator.pow(base, exp)
+
 
 _OPS = {
     ast.Add: operator.add,
     ast.Sub: operator.sub,
     ast.Mult: operator.mul,
     ast.Div: operator.truediv,
-    ast.Pow: operator.pow,
+    ast.Pow: _guarded_pow,
     ast.Mod: operator.mod,
     ast.USub: operator.neg,
     ast.UAdd: operator.pos,
