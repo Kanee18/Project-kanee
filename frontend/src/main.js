@@ -633,6 +633,10 @@ const sidebar = new Sidebar({
 
 let backendState = "idle";
 let micHeld = false;
+// True from the first segment of a backend reply until reply_done. Lets the
+// segment player tell a true end-of-reply (settle promptly) apart from a drain
+// caused by TTS lagging between sentences (hold the emotion, await next segment).
+let replyStreaming = false;
 let emoteActive = false; // true while an emote clip plays — drives the foot→ground scroll
 const HOLOGRAM_DELAY = 8160;  // ms into answare_math when the hand reaches the display pose
 const HOLOGRAM_LINGER = 5000; // ms the answer screen stays up after it appears
@@ -668,12 +672,24 @@ function endMath() {
   avatar.hologram?.hide();
 }
 
-// After a reply finishes, the last emotion lingers briefly (a natural
-// trailing reaction), then the face eases back to neutral (gently, via the
-// FADE_OUT spring). Without this she'd hold e.g. [surprised] forever. Kept
-// short so the expression doesn't awkwardly hang around after she's done.
-const CALM_DOWN_MS = 700;
+// After a reply finishes, the last emotion lingers very briefly (a natural
+// trailing reaction) and then the face eases back to neutral via the gentle
+// FADE_OUT spring. During the linger expressions.trailing holds the dim so the
+// emotion can't bloom UP before it fades (that up-then-hold read as "the
+// expression pops in and waits 2-3 s"). A drain *mid-reply* (a TTS gap between
+// sentences) is bridged much longer so her face never flashes neutral mid-thought.
+const CALM_DOWN_MS = 450;   // true end of reply (generation done) → settle promptly
+const GAP_BRIDGE_MS = 2000; // drained while still streaming → hold, await next segment
 let calmTimer = null;
+
+function scheduleCalmDown(ms) {
+  clearTimeout(calmTimer);
+  calmTimer = setTimeout(() => {
+    calmTimer = null;
+    avatar.expressions?.reset();
+    avatar.motion?.setEmotion("neutral");
+  }, ms);
+}
 
 const player = new SegmentPlayer({
   onChange: () => {
@@ -688,18 +704,17 @@ const player = new SegmentPlayer({
         clearTimeout(calmTimer);
         calmTimer = null;
       } else {
-        // Queue drained naturally: linger, then ease back to neutral.
-        clearTimeout(calmTimer);
-        calmTimer = setTimeout(() => {
-          calmTimer = null;
-          avatar.expressions?.reset();
-          avatar.motion?.setEmotion("neutral");
-        }, CALM_DOWN_MS);
+        // Hold the dim through the linger so the emotion can't bloom up, then
+        // ease to neutral. A drain while the reply is still streaming is just a
+        // between-sentence TTS gap → bridge it long instead of settling early.
+        if (avatar.expressions) avatar.expressions.trailing = true;
+        scheduleCalmDown(replyStreaming ? GAP_BRIDGE_MS : CALM_DOWN_MS);
       }
     } else if (calmTimer !== null) {
       // More audio arrived (still streaming) — keep the current emotion.
       clearTimeout(calmTimer);
       calmTimer = null;
+      if (avatar.expressions) avatar.expressions.trailing = false;
     }
     // Between sentences nothing resets: each segment's emotion holds until
     // the next one arrives (anime-timing spec).
@@ -772,6 +787,7 @@ ws.on("math", (msg) => {
   pendingMath = { expr: msg.expr, answer: msg.answer };
 });
 ws.on("segment", (msg) => {
+  replyStreaming = true; // a backend reply is in flight (cleared on reply_done)
   ui.addSegment(msg);
   player.enqueue(msg);
 });
@@ -779,6 +795,10 @@ ws.on("reply_done", () => {
   // The hologram is on its own 8.16 s timer from when the animation started,
   // so nothing to show here — just drop a math answer that never got a segment.
   if (!mathActive) pendingMath = null;
+  replyStreaming = false;
+  // If playback already drained and we're sitting on the long mid-stream bridge,
+  // reply_done confirms this was the true end — settle promptly instead.
+  if (calmTimer !== null && !player.playing && !mathActive) scheduleCalmDown(CALM_DOWN_MS);
   // Start a fresh chat bubble for whatever speaks next (next reply, or a
   // proactive game comment) so they don't merge into one row.
   ui.newReply();
@@ -793,6 +813,7 @@ function interruptIfBusy() {
   if (player.playing || backendState === "thinking" || backendState === "speaking") {
     ws.send({ type: "interrupt" });
     player.flush();
+    replyStreaming = false;
     // Interrupt eases everything back to neutral immediately (no linger).
     clearTimeout(calmTimer);
     calmTimer = null;

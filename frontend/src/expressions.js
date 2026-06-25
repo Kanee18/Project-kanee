@@ -30,7 +30,14 @@ const EMPHASIS_TAU = 0.25;   // s — emphasis pulse decay
 // many lines read as "no expression".)
 const SPEAK_SCALE = { happy: 0.5, surprised: 0.6, relaxed: 0.85, sad: 0.9, angry: 0.92 };
 const SPEAK_SCALE_DEFAULT = 0.85;
-const SPEAK_TAU = 0.28; // s — ease in/out of "speaking-ness" (smooth, no end-pop)
+// Speaking-ness eases ON fast (dim the emotion the instant a viseme could fight
+// it) but OFF slowly. The slow release is the whole point: if the dim lifted
+// quickly when she stops talking, the emotion would BLOOM brighter right after
+// the last word (e.g. happy 0.5 → 1.0) and sit there — which read as "the
+// expression pops up and lingers 2-3 s after she's done." Releasing slower than
+// the fade-to-neutral keeps the face monotonically relaxing, never brightening.
+const SPEAK_ATTACK = 0.10;  // s — dim onset when she starts talking
+const SPEAK_RELEASE = 0.7;  // s — un-dim after she stops (slow: no end-of-line bloom)
 
 // Extra held eye-narrowing per emotion (half-lidded looks), applied via the
 // blink lid in motion.js — adds detail the 5 face presets can't on their own.
@@ -78,6 +85,9 @@ export class ExpressionController {
     this._emphasis = 0;
     this._emote = null; // { t, dur } while the idol-wink emote is running
     this.speaking = false; // set by main.js; scales emotion down so visemes lead
+    this.trailing = false; // set by main.js for the short post-line linger: keeps
+                           // the dim applied so the held emotion can't bloom up
+                           // before it fades to neutral.
     this._speak = 0;       // 0..1 eased "speaking-ness"
     this._emotionName = "neutral";
     this._idleT = 0;
@@ -115,6 +125,7 @@ export class ExpressionController {
       name = "neutral";
     }
     this._emotionName = name;
+    this.trailing = false; // a fresh emotion is speaking now — end any post-line linger
     for (const key of this._available) this._targets[key] = map[key] ?? 0;
     if (this.motion) {
       this.motion.suppressBlink = name === "surprised";
@@ -162,8 +173,11 @@ export class ExpressionController {
     delta = Math.min(delta, 0.05); // tab-away dt spike would explode the springs
     this._emphasis *= Math.exp(-delta / EMPHASIS_TAU);
     // Ease the emotion scale toward speaking/not (emote holds full emotion).
-    const speakTarget = this.speaking && !this._emote ? 1 : 0;
-    this._speak += (speakTarget - this._speak) * (1 - Math.exp(-delta / SPEAK_TAU));
+    // `trailing` keeps the dim ON through the brief post-line linger so the
+    // emotion holds at its spoken level (no bloom) until it fades to neutral.
+    const speakTarget = (this.speaking || this.trailing) && !this._emote ? 1 : 0;
+    const speakTau = speakTarget > this._speak ? SPEAK_ATTACK : SPEAK_RELEASE;
+    this._speak += (speakTarget - this._speak) * (1 - Math.exp(-delta / speakTau));
     let eyeClose = 0; // how much the active emotion already shuts the eyes
     for (const name of this._available) {
       const s = this._weights[name];
